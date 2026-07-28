@@ -10,6 +10,7 @@ target/
 # NW.js cache
 nwjs_cache/
 CircuitJS1 Desktop Mod/
+/circuitjs-tauri.exe
 
 #Inno Setup Output
 Inno Setup/Output/
