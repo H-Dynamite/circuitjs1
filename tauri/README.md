@@ -6,6 +6,31 @@ This directory packages CircuitJS1 as a Tauri 2 desktop application for
 Windows and Linux. Tauri embeds the static application in the sibling `war`
 directory; no web server is required at runtime.
 
+## Required first step: compile CircuitJS1
+
+The Tauri project only packages existing web files. It does **not** compile
+the Java/GWT application. Before running either Tauri build script, compile
+CircuitJS1 from the repository root:
+
+```text
+mvn clean install
+```
+
+Then copy the entire generated GWT runtime:
+
+```powershell
+Copy-Item -Recurse -Force target\site\circuitjs1 war\circuitjs1
+```
+
+Verify this file exists before packaging:
+
+```text
+war/circuitjs1/circuitjs1.nocache.js
+```
+
+Copying only `circuitjs1.nocache.js` is not sufficient because it loads the
+`*.cache.js` files and other resources in the same directory.
+
 ## Changes
 
 - Added a minimal Tauri 2/Rust wrapper in `tauri/src-tauri`.
@@ -109,4 +134,3 @@ chmod +x CircuitJS1*.AppImage
 ```
 
 The application is offline and does not require a local web server.
-

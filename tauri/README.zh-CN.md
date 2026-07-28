@@ -2,6 +2,31 @@
 
 [English](README.md)
 
+## 必须先编译 CircuitJS1
+
+Tauri 工程只负责包装已有的网页文件，**不会**编译 Java/GWT 应用。执行任何
+Tauri 打包脚本之前，必须先在仓库根目录编译 CircuitJS1：
+
+```text
+mvn clean install
+```
+
+然后复制完整的 GWT 运行目录：
+
+```powershell
+Copy-Item -Recurse -Force target\site\circuitjs1 war\circuitjs1
+```
+
+打包前确认以下文件存在：
+
+```text
+war/circuitjs1/circuitjs1.nocache.js
+```
+
+不能只复制 `circuitjs1.nocache.js`，因为它还会加载同目录的
+`*.cache.js`、示例电路、语言包和其他资源。缺少完整目录时，程序窗口虽然
+可以打开，但模拟器菜单、画布和元件不会加载。
+
 本目录使用 Tauri 2 将 CircuitJS1 封装为 Windows 和 Linux 桌面程序。Tauri
 直接嵌入同级目录 `war` 中的静态网页，程序运行时不需要启动 Web 服务器。
 
