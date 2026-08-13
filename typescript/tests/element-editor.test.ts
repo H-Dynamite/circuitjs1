@@ -3,7 +3,7 @@ import {
   NativeCircuitApp,
   parseEditableNumber
 } from "../src/app/NativeCircuitApp";
-import { Switch2Elm } from "../src/core";
+import { PotElm, Switch2Elm, SwitchElm, VarRailElm } from "../src/core";
 
 describe("element property editor", () => {
   beforeEach(() => {
@@ -94,5 +94,101 @@ describe("element property editor", () => {
       "flip-y",
       "split-wire"
     ]);
+  });
+
+  it("uses real canvas pointer events for momentary switch press and release", () => {
+    const root = document.querySelector<HTMLElement>("#app")!;
+    const app = new NativeCircuitApp(root);
+    app.api.loadCircuit(
+      [
+        "$ 1 0.000005 10 50 5",
+        "s 0 0 64 0 0 1 true"
+      ].join("\n")
+    );
+
+    const element = app.api.getElements()[0] as SwitchElm;
+    expect(element.momentary).toBe(true);
+    expect(element.position).toBe(1);
+    const canvas = root.querySelector<HTMLCanvasElement>("#circuit-canvas")!;
+    Object.defineProperty(canvas, "getBoundingClientRect", {
+      value: () => ({ left: 0, top: 0, width: 800, height: 600 })
+    });
+    Object.defineProperty(canvas, "setPointerCapture", { value: () => {} });
+    const point = app.api.getElementClickPoint(0);
+    const pointer = (type: string) => {
+      const event = new MouseEvent(type, {
+        bubbles: true,
+        button: 0,
+        clientX: point.x,
+        clientY: point.y
+      }) as PointerEvent;
+      Object.defineProperty(event, "pointerId", { value: 1 });
+      return event;
+    };
+    canvas.dispatchEvent(
+      pointer("pointerdown")
+    );
+    expect(element.position).toBe(0);
+    canvas.dispatchEvent(
+      pointer("pointerup")
+    );
+    expect(element.position).toBe(1);
+
+    const stepped = app.api.stepSimulation(1);
+    const snapshot = app.api.getDynamicSnapshot();
+    expect(stepped.steps).toBe(1);
+    expect(snapshot.running).toBe(false);
+    expect(snapshot.time).toBeGreaterThanOrEqual(0);
+    expect(snapshot.elements).toEqual([
+      expect.objectContaining({
+        index: 0,
+        type: "SwitchElm",
+        switchPosition: 1,
+        volts: expect.any(Array),
+        current: expect.any(Number),
+        power: expect.any(Number)
+      })
+    ]);
+  });
+
+  it("changes variable rails and potentiometers through visible range inputs", () => {
+    const root = document.querySelector<HTMLElement>("#app")!;
+    const app = new NativeCircuitApp(root);
+    const state = app as unknown as {
+      selectedIndex: number | null;
+      selectedIndices: Set<number>;
+      updateInspector(): void;
+    };
+
+    app.api.loadCircuit(
+      [
+        "$ 1 0.000005 10 50 5",
+        "172 0 0 0 64 0 6 5 5 0 0 0.5 Voltage"
+      ].join("\n")
+    );
+    state.selectedIndex = 0;
+    state.selectedIndices.add(0);
+    state.updateInspector();
+    const railRange = root.querySelector<HTMLInputElement>(
+      'input[type="range"][data-element-range="var-rail-voltage"]'
+    )!;
+    railRange.value = "25";
+    railRange.dispatchEvent(new Event("input", { bubbles: true }));
+    expect((app.api.getElements()[0] as VarRailElm).sliderValue).toBe(25);
+
+    app.api.loadCircuit(
+      ["$ 1 0.000005 10 50 5", "174 0 0 64 0 0 1000 0.5 Resistance"].join(
+        "\n"
+      )
+    );
+    state.selectedIndex = 0;
+    state.selectedIndices.add(0);
+    state.updateInspector();
+    const potRange = root.querySelector<HTMLInputElement>(
+      'input[type="range"][data-element-range="potentiometer"]'
+    )!;
+    potRange.value = "75";
+    potRange.dispatchEvent(new Event("input", { bubbles: true }));
+    expect((app.api.getElements()[0] as PotElm).position).toBeCloseTo(0.7475);
   });
 });

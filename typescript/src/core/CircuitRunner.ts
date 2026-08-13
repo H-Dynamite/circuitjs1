@@ -19,10 +19,12 @@ import { VoltageSource } from "./VoltageSource";
 import type { XmlRecord } from "./XMLDeserializer";
 import { XMLDeserializer } from "./XMLDeserializer";
 import {
+  CapacitorElm,
   GroundElm,
   CurrentElm,
   LabeledNodeElm,
   RailElm,
+  TransistorElm,
   VoltageElm
 } from "./elements";
 import { SparseLU } from "./matrix";
@@ -62,11 +64,25 @@ export interface CircuitStepResult {
   time: number;
 }
 
+export interface SolverTraceSample {
+  subIteration: number;
+  index: number;
+  type: string;
+  volts: number[];
+  current: number;
+  lastVbe: number | null;
+  lastVbc: number | null;
+  capacitorVoltage: number | null;
+  capacitorSource: number | null;
+}
+
 export interface CircuitScopePlot {
   elementIndex: number;
   value: number;
   panel: number;
   scale: number | null;
+  /** Identity of the legacy Scope record which owns this plot. */
+  scopeId: number;
 }
 
 /**
@@ -89,6 +105,7 @@ export class CircuitRunner {
   public preservedTextRecords: string[] = [];
   public preservedXmlRecords: XmlRecord[] = [];
   private readonly isolatedRails = new Set<RailElm>();
+  private diagnosticTrace: SolverTraceSample[] | null = null;
 
   public constructor(
     elements: CircuitElm[],
@@ -156,10 +173,11 @@ export class CircuitRunner {
       .filter((index) => Number.isFinite(index));
     runner.scopePlots = document.records
       .filter(
-        (record): record is CircuitScopeRecord =>
-          record.kind === "scope"
+        (record): record is CircuitScopeRecord => record.kind === "scope"
       )
-      .flatMap((record) => CircuitRunner.parseTextScopePlots(record))
+      .flatMap((record, scopeId) =>
+        CircuitRunner.parseTextScopePlots(record, scopeId)
+      )
       .filter(
         (plot) =>
           Number.isFinite(plot.elementIndex) &&
@@ -225,7 +243,7 @@ export class CircuitRunner {
       .filter((index) => Number.isFinite(index));
     runner.scopePlots = document.records
       .filter((record) => record.kind === "scope")
-      .flatMap((record) => {
+      .flatMap((record, scopeId) => {
         const defaultElement = Number.parseInt(
           record.attributes.en ?? "",
           10
@@ -237,7 +255,8 @@ export class CircuitRunner {
               elementIndex: defaultElement,
               value: 0,
               panel,
-              scale: null
+              scale: null,
+              scopeId
             }
           ];
         }
@@ -253,7 +272,8 @@ export class CircuitRunner {
             scale:
               child.attributes.sc === undefined
                 ? null
-                : Number(child.attributes.sc)
+                : Number(child.attributes.sc),
+            scopeId
           }));
       })
       .filter(
@@ -265,7 +285,8 @@ export class CircuitRunner {
   }
 
   private static parseTextScopePlots(
-    record: CircuitScopeRecord
+    record: CircuitScopeRecord,
+    scopeId: number
   ): CircuitScopePlot[] {
     const args = record.arguments;
     const elementIndex = Number.parseInt(args[0] ?? "", 10);
@@ -283,7 +304,8 @@ export class CircuitRunner {
         elementIndex,
         value,
         panel,
-        scale: scaleFor(value)
+        scale: scaleFor(value),
+        scopeId
       }
     ];
     const hasExplicitPlots = (flags & 4096) !== 0;
@@ -302,7 +324,8 @@ export class CircuitRunner {
         elementIndex: nextElement,
         value: nextValue,
         panel,
-        scale: scaleFor(nextValue)
+        scale: scaleFor(nextValue),
+        scopeId
       });
     }
     return plots;
@@ -318,6 +341,19 @@ export class CircuitRunner {
 
   public resetTime(): void {
     this.simulation.t = 0;
+  }
+
+  /** Test-only, opt-in solver trace.  It never participates in solving. */
+  public beginDiagnosticTrace(): void { this.diagnosticTrace = []; }
+
+  public recordDiagnosticTraceSnapshot(): void {
+    this.recordDiagnosticTrace(-1);
+  }
+
+  public consumeDiagnosticTrace(): SolverTraceSample[] {
+    const trace = this.diagnosticTrace ?? [];
+    this.diagnosticTrace = null;
+    return trace;
   }
 
   public analyzeCircuit(): void {
@@ -519,6 +555,17 @@ export class CircuitRunner {
         element.doStep();
       }
 
+      // Legacy SimulationManager checks element convergence after doStep()
+      // and, for a nonlinear matrix after the first pass, retains the prior
+      // solved right-side instead of performing one more LU solve.  Keeping
+      // that stopping point is observable for transient circuits whose final
+      // Newton correction is small but nonzero.
+      if (circuitNonLinear && this.simulation.converged && subIteration > 0) {
+        this.recordDiagnosticTrace(subIteration);
+        converged = true;
+        break;
+      }
+
       const matrix = this.requireMatrix();
       const matrixSnapshot = matrix.matrix.map((row) => [...row]);
       if (
@@ -542,6 +589,7 @@ export class CircuitRunner {
         matrix
       );
       const maximumDelta = this.applySolution(matrix.rightSide, previous);
+      this.recordDiagnosticTrace(subIteration);
       lastMaximumDelta = maximumDelta;
       lastElementConvergence = this.simulation.converged;
       // Match SimulationManager: linear circuits finish after one solve;
@@ -1009,6 +1057,26 @@ export class CircuitRunner {
       source.elm?.setCurrent(source, solution[source.row - 1]);
     }
     return maximumDelta;
+  }
+
+  private recordDiagnosticTrace(subIteration: number): void {
+    if (this.diagnosticTrace === null) return;
+    for (let index = 0; index < this.elements.length; index += 1) {
+      const element = this.elements[index];
+      const transistor = element instanceof TransistorElm ? element : null;
+      const capacitor = element instanceof CapacitorElm ? element : null;
+      this.diagnosticTrace.push({
+        subIteration,
+        index,
+        type: element.constructor.name,
+        volts: [...element.volts],
+        current: element.current,
+        lastVbe: transistor?.lastvbe ?? null,
+        lastVbc: transistor?.lastvbc ?? null,
+        capacitorVoltage: capacitor?.voltdiff ?? null,
+        capacitorSource: capacitor?.curSourceValue ?? null
+      });
+    }
   }
 
   private requireMatrix(): CircuitMatrix {

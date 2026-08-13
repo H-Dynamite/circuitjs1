@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NativeCircuitApp } from "../src/app/NativeCircuitApp";
-import { CircuitRunner, VoltageElm } from "../src/core";
+import { CircuitRunner, CustomCompositeElm, VoltageElm } from "../src/core";
 
 describe("options menu functionality", () => {
   beforeEach(() => {
@@ -24,8 +24,8 @@ describe("options menu functionality", () => {
       ].join("\n")
     );
     expect(scopedRunner.scopePlots).toEqual([
-      { elementIndex: 0, value: 0, panel: 2, scale: 20 },
-      { elementIndex: 0, value: 3, panel: 2, scale: 0.05 }
+      { elementIndex: 0, value: 0, panel: 2, scale: 20, scopeId: 0 },
+      { elementIndex: 0, value: 3, panel: 2, scale: 0.05, scopeId: 0 }
     ]);
 
     const root = document.querySelector<HTMLElement>("#app");
@@ -110,5 +110,270 @@ describe("options menu functionality", () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
     root!.querySelector<HTMLButtonElement>("#subcircuit-delete")?.click();
     expect(app.api.exportCircuit()).not.toContain('<ccm nm="demo"');
+  });
+
+  it("creates a file-menu subcircuit and makes the Dropbox gap explicit", () => {
+    const root = document.querySelector<HTMLElement>("#app");
+    expect(root).not.toBeNull();
+    const app = new NativeCircuitApp(root!);
+    app.api.loadCircuit(
+      '<cir ts="0.000005">' +
+        '<r x="0 0 64 0" f="0" r="100"/>' +
+        '<ln x="0 0 0 -32" f="0" te="input"/>' +
+        '<ln x="64 0 64 32" f="0" te="output"/>' +
+      "</cir>"
+    );
+
+    root!
+      .querySelector<HTMLButtonElement>('[data-action="create-subcircuit"]')
+      ?.click();
+    expect(
+      root!.querySelector<HTMLDialogElement>("#subcircuit-create-dialog")
+        ?.hasAttribute("open")
+    ).toBe(true);
+    root!.querySelector<HTMLInputElement>("#subcircuit-name")!.value = "divider";
+    root!.querySelector<HTMLButtonElement>("#subcircuit-create")?.click();
+    expect(app.api.exportCircuit()).toContain('<ccm nm="divider"');
+    expect(app.api.exportCircuit()).toContain('<ext nm="input"');
+    expect(app.api.exportCircuit()).toContain('<ext nm="output"');
+
+    const exported = app.api.exportCircuit();
+    const reloadedRoot = document.createElement("div");
+    document.body.append(reloadedRoot);
+    const reloaded = new NativeCircuitApp(reloadedRoot);
+    reloaded.api.loadCircuit(
+      exported.replace(
+        "</cir>",
+        '<cc x="128 0 160 0" f="0" mo="divider"/></cir>'
+      )
+    );
+    expect(
+      reloaded.api.getElements().some(
+        (element) => element instanceof CustomCompositeElm
+      )
+    ).toBe(true);
+    expect(() => reloaded.api.stepSimulation(1)).not.toThrow();
+
+    root!
+      .querySelector<HTMLButtonElement>('[data-action="import-dropbox"]')
+      ?.click();
+    expect(root!.querySelector("#dialog-title")?.textContent).toBe(
+      "Dropbox 导入不可用"
+    );
+    expect(root!.querySelector<HTMLTextAreaElement>("#circuit-text")?.value)
+      .toContain("不会把此菜单伪装成云端导入");
+  });
+
+  it("rejects invalid external subcircuit pins instead of silently changing them", () => {
+    const create = (source: string, name: string) => {
+      const root = document.createElement("div");
+      document.body.append(root);
+      const app = new NativeCircuitApp(root);
+      app.api.loadCircuit(source);
+      root
+        .querySelector<HTMLButtonElement>('[data-action="create-subcircuit"]')
+        ?.click();
+      root.querySelector<HTMLInputElement>("#subcircuit-name")!.value = name;
+      root.querySelector<HTMLButtonElement>("#subcircuit-create")?.click();
+      return root.querySelector("#subcircuit-create-error")?.textContent;
+    };
+    const root = '<cir ts="0.000005">';
+    const close = "</cir>";
+    expect(
+      create(
+        root +
+          '<r x="0 0 64 0" f="0" r="100"/>' +
+          '<ln x="0 0 0 -32" f="0" te="one"/>' +
+          '<ln x="0 0 32 0" f="0" te="two"/>' +
+        close,
+        "duplicate-node"
+      )
+    ).toContain("同一节点");
+    expect(
+      create(
+        root +
+          '<r x="0 0 64 0" f="0" r="100"/>' +
+          '<g x="0 0 0 32" f="0"/>' +
+          '<ln x="0 0 0 -32" f="0" te="grounded"/>' +
+        close,
+        "grounded-node"
+      )
+    ).toContain("不能连接到地");
+    expect(
+      create(
+        root +
+          '<r x="0 0 64 0" f="0" r="100"/>' +
+          '<ln x="128 0 128 -32" f="0" te="unused"/>' +
+        close,
+        "unused-node"
+      )
+    ).toContain("未连接");
+  });
+
+  it("keeps scope and plot ownership when arranging, combining, and separating scopes", async () => {
+    const root = document.querySelector<HTMLElement>("#app");
+    expect(root).not.toBeNull();
+    const app = new NativeCircuitApp(root!);
+    app.api.loadCircuit("$ 1 0.000005 10.2 50 5 43 5e-11");
+    const scopeActions = [
+      "scope-stack",
+      "scope-unstack",
+      "scope-combine",
+      "scope-separate"
+    ] as const;
+    for (const action of scopeActions) {
+      expect(
+        root!.querySelector<HTMLButtonElement>(`[data-action="${action}"]`)
+          ?.disabled
+      ).toBe(true);
+    }
+
+    app.api.loadCircuit(
+      [
+        "$ 1 0.000005 10.2 50 5 43 5e-11",
+        "r 0 0 32 0 0 10",
+        "r 64 0 96 0 0 20",
+        "o 0 64 0 0 20 0 0",
+        "o 1 64 3 0 0.05 1 1"
+      ].join("\n")
+    );
+    for (const action of scopeActions) {
+      expect(
+        root!.querySelector<HTMLButtonElement>(`[data-action="${action}"]`)
+          ?.disabled
+      ).toBe(false);
+    }
+
+    const scopePanels = () =>
+      app.api.getDynamicSnapshot().scopes.map((scope) => scope.panel);
+    const scopeIds = () =>
+      app.api.getDynamicSnapshot().scopes.map((scope) => scope.scopeId);
+    expect(scopePanels()).toEqual([0, 1]);
+    expect(scopeIds()).toEqual([0, 1]);
+    expect(app.api.getDynamicSnapshot().scopeCount).toBe(2);
+
+    root!
+      .querySelector<HTMLButtonElement>('[data-action="scope-stack"]')
+      ?.click();
+    expect(scopePanels()).toEqual([0, 0]);
+
+    root!
+      .querySelector<HTMLButtonElement>('[data-action="scope-unstack"]')
+      ?.click();
+    expect(scopePanels()).toEqual([0, 1]);
+
+    root!
+      .querySelector<HTMLButtonElement>('[data-action="scope-combine"]')
+      ?.click();
+    expect(app.api.getDynamicSnapshot().scopeCount).toBe(1);
+    expect(scopeIds()).toEqual([0, 0]);
+    expect(app.api.getDynamicSnapshot().scopes.map((scope) => scope.plotCount)).toEqual([2, 2]);
+
+    root!
+      .querySelector<HTMLButtonElement>('[data-action="scope-unstack"]')
+      ?.click();
+    expect(scopePanels()).toEqual([0, 0]);
+    expect(app.api.getDynamicSnapshot().scopeCount).toBe(1);
+    expect(
+      root!
+        .querySelector<HTMLButtonElement>('[data-action="scope-separate"]')
+        ?.disabled
+    ).toBe(false);
+
+    app.api.stepSimulation(1);
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    const createObjectUrl = vi.fn(() => "blob:scope-export");
+    vi.stubGlobal("URL", {
+      ...URL,
+      createObjectURL: createObjectUrl,
+      revokeObjectURL: vi.fn()
+    });
+    root!
+      .querySelector<HTMLButtonElement>('[data-action="scope-export-csv"]')
+      ?.click();
+    const csvBlob = createObjectUrl.mock.calls[0]?.[0];
+    expect(csvBlob).toBeInstanceOf(Blob);
+    expect((csvBlob as Blob).type).toContain("text/csv");
+    expect((csvBlob as Blob).size).toBeGreaterThan(20);
+    const csv = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.addEventListener("load", () => resolve(String(reader.result)));
+      reader.addEventListener("error", () => reject(reader.error));
+      reader.readAsText(csvBlob as Blob);
+    });
+    expect(csv.split("\n")[0]).toContain("Resistor");
+    expect(csv.split("\n")[0].split(",")).toHaveLength(3);
+
+    root!
+      .querySelector<HTMLButtonElement>('[data-action="scope-separate"]')
+      ?.click();
+    expect(app.api.getDynamicSnapshot().scopeCount).toBe(2);
+    expect(scopeIds()).toEqual([0, 1]);
+    expect(scopePanels()).toEqual([0, 1]);
+
+    const reloadedRoot = document.createElement("div");
+    document.body.append(reloadedRoot);
+    const reloaded = new NativeCircuitApp(reloadedRoot);
+    reloaded.api.loadCircuit(app.api.exportCircuit());
+    expect(reloaded.api.getDynamicSnapshot().scopeCount).toBe(2);
+    expect(reloaded.api.getDynamicSnapshot().scopes.map((scope) => scope.panel)).toEqual([0, 1]);
+  });
+
+  it("keeps a voltage/current pair together when separating a combined scope", () => {
+    const root = document.querySelector<HTMLElement>("#app");
+    const app = new NativeCircuitApp(root!);
+    app.api.loadCircuit(
+      [
+        "$ 1 0.000005 10.2 50 5 43 5e-11",
+        "r 0 0 32 0 0 10",
+        "r 64 0 96 0 0 20",
+        "o 0 64 0 4096 20 0.05 0 2 0 3",
+        "o 1 64 0 0 20 0 1"
+      ].join("\n")
+    );
+    root!
+      .querySelector<HTMLButtonElement>('[data-action="scope-combine"]')
+      ?.click();
+    root!
+      .querySelector<HTMLButtonElement>('[data-action="scope-separate"]')
+      ?.click();
+    const snapshot = app.api.getDynamicSnapshot();
+    expect(snapshot.scopeCount).toBe(2);
+    expect(snapshot.scopes.map((scope) => scope.plotCount)).toEqual([2, 2, 1]);
+    expect(snapshot.scopes.map((scope) => scope.panel)).toEqual([0, 0, 1]);
+  });
+
+  it("writes ScopeGroup changes to XML export and restores them on reload", () => {
+    const root = document.querySelector<HTMLElement>("#app");
+    const app = new NativeCircuitApp(root!);
+    app.api.loadCircuit(
+      '<cir ts="0.000005"><r x="0 0 32 0" f="0" r="10"/>' +
+        '<r x="64 0 96 0" f="0" r="20"/>' +
+        '<o en="0" p="0"><p v="0" sc="20"/></o>' +
+        '<o en="1" p="1"><p v="3" sc="0.05"/></o></cir>'
+    );
+    root!
+      .querySelector<HTMLButtonElement>('[data-action="scope-combine"]')
+      ?.click();
+    const exported = app.api.exportCircuit();
+    expect((exported.match(/<o\b/g) ?? [])).toHaveLength(1);
+    expect((exported.match(/<p\b/g) ?? [])).toHaveLength(2);
+
+    const reloadedRoot = document.createElement("div");
+    document.body.append(reloadedRoot);
+    const reloaded = new NativeCircuitApp(reloadedRoot);
+    reloaded.api.loadCircuit(exported);
+    const snapshot = reloaded.api.getDynamicSnapshot();
+    expect(snapshot.scopeCount).toBe(1);
+    expect(snapshot.scopes.map((scope) => scope.plotCount)).toEqual([2, 2]);
+    expect(snapshot.scopes.map((scope) => scope.panel)).toEqual([0, 0]);
+
+    root!
+      .querySelector<HTMLButtonElement>('[data-action="scope-separate"]')
+      ?.click();
+    root!
+      .querySelector<HTMLButtonElement>('[data-action="undo"]')
+      ?.click();
+    expect(app.api.getDynamicSnapshot().scopeCount).toBe(1);
   });
 });

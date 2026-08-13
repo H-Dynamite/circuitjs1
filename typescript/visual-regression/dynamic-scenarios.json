@@ -1,0 +1,156 @@
+{
+  "$schema": "./dynamic-scenarios.schema.json",
+  "version": 1,
+  "purpose": "Declarative dynamic visual-regression contract. The runner must perform every action through the rendered browser UI; the test bridge may only locate elements, pause/run a deterministic number of solver steps, and observe state.",
+  "captureContract": {
+    "viewport": { "width": 1280, "height": 900 },
+    "artifactsPerFrame": [
+      "legacy.png",
+      "ts.png",
+      "diff.png",
+      "metadata.json"
+    ],
+    "metadata": [
+      "actionLog",
+      "simulationTime",
+      "targetState",
+      "elementVoltages",
+      "elementCurrents",
+      "elementPower",
+      "serializedCircuitSha256",
+      "scopeSummary"
+    ],
+    "frames": {
+      "F0": "Circuit loaded, viewport fitted, simulation paused, before any probe action.",
+      "F1": "Target located and UI ready; still no target-state mutation.",
+      "F2": "Immediately after the specified real UI input (or pointerdown for hold actions).",
+      "F3": "After F2 and exactly one deterministic solver step.",
+      "F4": "After the next nine deterministic solver steps; for hold actions this is immediately after pointerup then ten steps.",
+      "F5": "After a further ninety deterministic solver steps, or the declared settled predicate, whichever occurs first."
+    }
+  },
+  "scenarios": [
+    {
+      "id": "dynamic-cap-switch2",
+      "priority": 0,
+      "circuit": "cap.txt",
+      "category": "switch",
+      "target": { "dumpType": "S", "ordinal": 0, "circuitPoint": { "x": 256, "y": 104 }, "expectedInitial": { "position": 0 } },
+      "operation": { "kind": "click-element", "button": "left", "expectedAfterInput": { "position": 1 } },
+      "frames": { "F0": { "steps": 0 }, "F1": { "steps": 0 }, "F2": { "after": "click" }, "F3": { "steps": 1 }, "F4": { "steps": 10 }, "F5": { "steps": 100, "settle": { "maxDeltaVoltage": 0.0001, "consecutiveSteps": 10 } } }
+    },
+    {
+      "id": "dynamic-multivib-mono-push-switch",
+      "priority": 0,
+      "circuit": "multivib-mono.txt",
+      "category": "momentary-switch",
+      "target": { "dumpType": "s", "ordinal": 0, "circuitPoint": { "x": 128, "y": 192 }, "expectedInitial": { "position": 1, "momentary": true } },
+      "operation": { "kind": "hold-element", "button": "left", "expectedDuringHold": { "position": 0 }, "expectedAfterRelease": { "position": 1 } },
+      "frames": { "F0": { "steps": 0 }, "F1": { "steps": 0 }, "F2": { "after": "pointerdown" }, "F3": { "steps": 1, "while": "pointerdown" }, "F4": { "after": "pointerup", "steps": 10 }, "F5": { "steps": 100, "settle": { "maxDeltaVoltage": 0.0001, "consecutiveSteps": 10 } } }
+    },
+    {
+      "id": "dynamic-3-cgand-logic-input-a",
+      "priority": 0,
+      "circuit": "3-cgand.txt",
+      "category": "logic-input",
+      "target": { "dumpType": "L", "ordinal": 0, "circuitPoint": { "x": 128, "y": 192 }, "expectedInitial": { "position": 2 } },
+      "operation": { "kind": "click-element", "button": "left", "expectedAfterInput": { "position": 0 } },
+      "acceptance": {
+        "stateMachine": "The target is a ternary LogicInputElm (flags=1). A single Canvas click advances position modulo three, so the saved initial position 2 must transition to 0.",
+        "solvedTarget": {
+          "F3": { "position": 0, "volts": [0], "current": 0, "power": 0 },
+          "F4": { "position": 0, "volts": [0], "current": 0, "power": 0 },
+          "F5": { "position": 0, "volts": [0], "current": 0, "power": 0 }
+        },
+        "requiredActionEffects": [
+          "F2 target state differs from F1 and equals position 0.",
+          "F2 serializedCircuitSha256 differs from F1 within each app.",
+          "F3 target voltage is 0 V after exactly one solver step."
+        ]
+      },
+      "frames": { "F0": { "steps": 0 }, "F1": { "steps": 0 }, "F2": { "after": "click" }, "F3": { "steps": 1 }, "F4": { "steps": 10 }, "F5": { "steps": 100 } }
+    },
+    {
+      "id": "dynamic-potdivide-potentiometer",
+      "priority": 0,
+      "circuit": "potdivide.txt",
+      "category": "potentiometer",
+      "target": { "dumpType": "174", "ordinal": 0, "circuitPoint": { "x": 352, "y": 224 }, "expectedInitial": { "position": 0.5 } },
+      "operation": { "kind": "set-element-slider", "uiControl": "range", "value": 0.75, "expectedAfterInput": { "position": 0.7475 } },
+      "frames": { "F0": { "steps": 0 }, "F1": { "steps": 0 }, "F2": { "after": "range-input" }, "F3": { "steps": 1 }, "F4": { "steps": 10 }, "F5": { "steps": 100, "settle": { "maxDeltaVoltage": 0.0001, "consecutiveSteps": 10 } } }
+    },
+    {
+      "id": "dynamic-ohms-variable-rail",
+      "priority": 0,
+      "circuit": "ohms.txt",
+      "category": "variable-rail",
+      "target": { "dumpType": "172", "ordinal": 0, "circuitPoint": { "x": 304, "y": 152 }, "expectedInitial": { "sliderValue": 100, "voltage": 5 } },
+      "operation": { "kind": "set-element-slider", "uiControl": "range", "value": 50, "expectedAfterInput": { "sliderValue": 50, "voltage": 2.5 } },
+      "frames": { "F0": { "steps": 0 }, "F1": { "steps": 0 }, "F2": { "after": "range-input" }, "F3": { "steps": 1 }, "F4": { "steps": 10 }, "F5": { "steps": 100, "settle": { "maxDeltaVoltage": 0.0001, "consecutiveSteps": 10 } } }
+    },
+    {
+      "id": "dynamic-3way-left-switch",
+      "priority": 1,
+      "circuit": "3way.txt",
+      "category": "multiway-switch",
+      "target": { "dumpType": "S", "ordinal": 0, "circuitPoint": { "x": 152, "y": 208 }, "expectedInitial": { "position": 1 } },
+      "operation": { "kind": "click-element", "button": "left", "expectedAfterInput": { "position": 0 } },
+      "frames": { "F0": { "steps": 0 }, "F1": { "steps": 0 }, "F2": { "after": "click" }, "F3": { "steps": 1 }, "F4": { "steps": 10 }, "F5": { "steps": 100 } }
+    },
+    {
+      "id": "dynamic-4way-cross-switch",
+      "priority": 1,
+      "circuit": "4way.txt",
+      "category": "multiway-switch",
+      "target": { "dumpType": "S", "ordinal": 0, "circuitPoint": { "x": 288, "y": 176 }, "expectedInitial": { "position": 0 } },
+      "operation": { "kind": "click-element", "button": "left", "expectedAfterInput": { "position": 1 } },
+      "frames": { "F0": { "steps": 0 }, "F1": { "steps": 0 }, "F2": { "after": "click" }, "F3": { "steps": 1 }, "F4": { "steps": 10 }, "F5": { "steps": 100 } }
+    },
+    {
+      "id": "dynamic-latchingrelay-push-switch",
+      "priority": 1,
+      "circuit": "latchingrelay.txt",
+      "category": "momentary-switch",
+      "target": { "dumpType": "s", "ordinal": 0, "circuitPoint": { "x": 448, "y": 432 }, "expectedInitial": { "position": 1, "momentary": true } },
+      "operation": { "kind": "hold-element", "button": "left", "expectedDuringHold": { "position": 0 }, "expectedAfterRelease": { "position": 1 } },
+      "frames": { "F0": { "steps": 0 }, "F1": { "steps": 0 }, "F2": { "after": "pointerdown" }, "F3": { "steps": 1, "while": "pointerdown" }, "F4": { "after": "pointerup", "steps": 10 }, "F5": { "steps": 100 } }
+    },
+    {
+      "id": "dynamic-555monostable-momentary-logic",
+      "priority": 1,
+      "circuit": "555monostable.txt",
+      "category": "momentary-logic-input",
+      "target": { "dumpType": "L", "ordinal": 0, "circuitPoint": { "x": 64, "y": 240 }, "expectedInitial": { "position": 1, "momentary": true } },
+      "operation": { "kind": "hold-element", "button": "left", "expectedDuringHold": { "position": 0 }, "expectedAfterRelease": { "position": 1 } },
+      "frames": { "F0": { "steps": 0 }, "F1": { "steps": 0 }, "F2": { "after": "pointerdown" }, "F3": { "steps": 1, "while": "pointerdown" }, "F4": { "after": "pointerup", "steps": 10 }, "F5": { "steps": 100 } }
+    },
+    {
+      "id": "dynamic-fulladd-logic-input-a",
+      "priority": 1,
+      "circuit": "fulladd.txt",
+      "category": "logic-input",
+      "target": { "dumpType": "L", "ordinal": 0, "circuitPoint": { "x": 64, "y": 256 }, "expectedInitial": { "position": 1 } },
+      "operation": { "kind": "click-element", "button": "left", "expectedAfterInput": { "position": 0 } },
+      "frames": { "F0": { "steps": 0 }, "F1": { "steps": 0 }, "F2": { "after": "click" }, "F3": { "steps": 1 }, "F4": { "steps": 10 }, "F5": { "steps": 100 } }
+    },
+    {
+      "id": "dynamic-dac-bit0",
+      "priority": 1,
+      "circuit": "dac.txt",
+      "category": "logic-input",
+      "target": { "dumpType": "L", "ordinal": 0, "circuitPoint": { "x": 96, "y": 160 }, "expectedInitial": { "position": 1 } },
+      "operation": { "kind": "click-element", "button": "left", "expectedAfterInput": { "position": 0 } },
+      "frames": { "F0": { "steps": 0 }, "F1": { "steps": 0 }, "F2": { "after": "click" }, "F3": { "steps": 1 }, "F4": { "steps": 10 }, "F5": { "steps": 100 } }
+    },
+    {
+      "id": "dynamic-cc2-variable-rail-and-pot",
+      "priority": 1,
+      "circuit": "cc2.txt",
+      "category": "compound-adjustable",
+      "target": { "dumpType": "172", "ordinal": 0, "circuitPoint": { "x": 232, "y": 288 }, "expectedInitial": { "sliderValue": 90 } },
+      "operation": { "kind": "set-element-slider", "uiControl": "range", "value": 50, "expectedAfterInput": { "sliderValue": 50, "voltage": 2.5 } },
+      "secondaryTarget": { "dumpType": "174", "ordinal": 0, "circuitPoint": { "x": 240, "y": 200 }, "operation": { "kind": "set-element-slider", "uiControl": "range", "value": 0.25, "expectedAfterInput": { "position": 0.25 } } },
+      "frames": { "F0": { "steps": 0 }, "F1": { "steps": 0 }, "F2": { "after": "set-primary-range" }, "F3": { "steps": 1 }, "F4": { "after": "set-secondary-range", "steps": 10 }, "F5": { "steps": 100, "settle": { "maxDeltaVoltage": 0.0001, "consecutiveSteps": 10 } } }
+    }
+  ]
+}

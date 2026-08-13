@@ -17,10 +17,12 @@ import {
   InductorElm,
   FuseElm,
   LDRElm,
+  LabeledNodeElm,
   LogicInputElm,
   OpAmpRealElm,
   OptocouplerElm,
   Point,
+  PotElm,
   Rectangle,
   ResistorElm,
   RoutedWireElm,
@@ -33,7 +35,9 @@ import {
   TimeDelayRelayElm,
   TriStateElm,
   VoltageElm,
-  WireElm
+  VarRailElm,
+  WireElm,
+  type XmlRecord
 } from "../core";
 import {
   circuitExamples,
@@ -41,6 +45,7 @@ import {
 } from "../examples";
 import {
   CircuitCanvasRenderer,
+  getSwitchInteractionBounds,
   type DraftElement
 } from "../ui/CircuitCanvasRenderer";
 import {
@@ -295,14 +300,22 @@ const COMPONENT_BY_ID = new Map(
 );
 
 interface ScopeChannel {
+  elementIndex: number;
+  value: number;
   name: string;
   elementLabel: string;
   unit: string;
   color: string;
-  panel: number;
   scale: number | null;
   samples: number[];
   read: () => number;
+}
+
+/** App-layer counterpart of legacy ScopeManager's Scope array. */
+interface ScopeGroup {
+  scopeId: number;
+  panel: number;
+  plots: ScopeChannel[];
 }
 
 export interface NativeCircuitApi {
@@ -311,6 +324,70 @@ export interface NativeCircuitApi {
   setRunning(running: boolean): void;
   getElements(): readonly CircuitElm[];
   getTime(): number;
+  /**
+   * Regression-only observation point.  The caller must still use the real
+   * canvas UI to perform an interaction; this merely returns a viewport
+   * coordinate at which that interaction can be made.
+   */
+  getElementClickPoint(index: number): { x: number; y: number };
+  /** Advance a paused simulation by a deterministic number of solver steps. */
+  stepSimulation(steps?: number): { time: number; steps: number };
+  /** Capture numerical state after a real UI action without exposing core APIs. */
+  getDynamicSnapshot(): DynamicCircuitSnapshot;
+  /** Test-only solver trace; used only by --diagnostic visual regression. */
+  beginDiagnosticTrace(): void;
+  recordDiagnosticTraceSnapshot(): void;
+  consumeDiagnosticTrace(): ReturnType<CircuitRunner["consumeDiagnosticTrace"]>;
+  /** Test-only UI locator; never mutates circuit or simulation state. */
+  getElementRangeClickPoint(index: number): { x: number; y: number };
+  /** Test-only layout observation; never changes the rendered UI. */
+  getVisualRegressionLayout(): VisualRegressionLayout;
+}
+
+export interface VisualRegressionLayout {
+  canvas: { width: number; height: number; cssWidth: number; cssHeight: number };
+  scope: { width: number; height: number; cssWidth: number; cssHeight: number };
+  workspaceOrigin: { x: number; y: number };
+  workspace: { width: number; height: number };
+  sidebarX: number;
+  scopeY: number;
+  toolbarVisible: boolean;
+}
+
+export interface DynamicCircuitElementSnapshot {
+  index: number;
+  type: string;
+  volts: number[];
+  voltageDiff: number;
+  current: number;
+  power: number;
+  switchPosition: number | null;
+  switchMomentary: boolean | null;
+  sliderValue: number | null;
+  voltage: number | null;
+  position: number | null;
+}
+
+export interface DynamicScopeSnapshot {
+  scopeId: number;
+  plotCount: number;
+  name: string;
+  panel: number;
+  unit: string;
+  sampleCount: number;
+  lastSample: number | null;
+  minimum: number | null;
+  maximum: number | null;
+}
+
+export interface DynamicCircuitSnapshot {
+  time: number;
+  timeStep: number;
+  subIterations: number;
+  running: boolean;
+  elements: DynamicCircuitElementSnapshot[];
+  scopes: DynamicScopeSnapshot[];
+  scopeCount: number;
 }
 
 export class NativeCircuitApp {
@@ -348,7 +425,6 @@ export class NativeCircuitApp {
   private editDisabled = false;
   private mouseWheelEdit = false;
   private gridSize = 16;
-  private scopeLayout: "separate" | "combined" = "separate";
   private clipboard = "";
   private pasteOffset = 0;
   private contextPoint = new Point();
@@ -367,7 +443,8 @@ export class NativeCircuitApp {
   private resumeAfterFocus = false;
   private history: string[] = [];
   private historyIndex = -1;
-  private scopeChannels: ScopeChannel[] = [];
+  private scopeGroups: ScopeGroup[] = [];
+  private heldMomentarySwitch: SwitchElm | null = null;
   private lastFrameTime = performance.now();
   private errorMessage: string | null = null;
   private static readonly AUTOSAVE_KEY = "circuitjs1-ts-autosave";
@@ -449,7 +526,15 @@ export class NativeCircuitApp {
       exportCircuit: () => this.serializeCircuit(),
       setRunning: (running) => this.setRunning(running),
       getElements: () => this.runner.elements,
-      getTime: () => this.runner.simulation.t
+      getTime: () => this.runner.simulation.t,
+      getElementClickPoint: (index) => this.getElementClickPoint(index),
+      getElementRangeClickPoint: (index) => this.getElementRangeClickPoint(index),
+      getVisualRegressionLayout: () => this.getVisualRegressionLayout(),
+      stepSimulation: (steps) => this.stepSimulation(steps),
+      getDynamicSnapshot: () => this.getDynamicSnapshot(),
+      beginDiagnosticTrace: () => this.runner.beginDiagnosticTrace(),
+      recordDiagnosticTraceSnapshot: () => this.runner.recordDiagnosticTraceSnapshot(),
+      consumeDiagnosticTrace: () => this.runner.consumeDiagnosticTrace()
     };
 
     this.bindEvents();
@@ -496,6 +581,7 @@ export class NativeCircuitApp {
     this.elementDragMoved = false;
     this.errorMessage = null;
     this.configureScopeChannels();
+    this.syncOptionButtons();
     if (recordHistory) {
       this.commitHistory();
     }
@@ -509,6 +595,119 @@ export class NativeCircuitApp {
     this.running = running;
     this.updateRunButtonAppearance();
     this.runButton.classList.toggle("active", running);
+  }
+
+  private getElementClickPoint(index: number): { x: number; y: number } {
+    const element = this.runner.elements[index];
+    if (element === undefined) {
+      throw new RangeError(`Element index ${index} is outside the circuit`);
+    }
+    // Logic-input controls use the label at point2 as their click hot-zone;
+    // their wire midpoint is not interactive in the legacy UI either.
+    let modelPoint = new Point(
+      (element.point1.x + element.point2.x) / 2,
+      (element.point1.y + element.point2.y) / 2
+    );
+    if (element instanceof LogicInputElm || element instanceof BusLogicInputElm) {
+      modelPoint = new Point(element.point2);
+    } else if (element instanceof SwitchElm) {
+      const bounds = getSwitchInteractionBounds(element);
+      modelPoint = new Point(
+        (bounds.left + bounds.right) / 2,
+        (bounds.top + bounds.bottom) / 2
+      );
+    }
+    const canvasPoint = this.renderer.modelToScreen(modelPoint);
+    const bounds = this.canvas.getBoundingClientRect();
+    return { x: bounds.left + canvasPoint.x, y: bounds.top + canvasPoint.y };
+  }
+
+  private getElementRangeClickPoint(index: number): { x: number; y: number } {
+    const element = this.runner.elements[index];
+    if (element === undefined) {
+      throw new RangeError(`Element index ${index} is outside the circuit`);
+    }
+    const candidates = element instanceof PotElm
+      ? [element.post3, element.midpoint, element.point1, element.point2]
+      : [element.point1, element.point2];
+    for (const modelPoint of candidates) {
+      const point = this.renderer.modelToScreen(modelPoint);
+      if (this.renderer.hitTest(this.runner.elements, point.x, point.y) === index) {
+        const box = this.canvas.getBoundingClientRect();
+        return { x: box.left + point.x, y: box.top + point.y };
+      }
+    }
+    throw new Error(`No Canvas-visible interaction point for element ${index}`);
+  }
+
+  private stepSimulation(steps = 1): { time: number; steps: number } {
+    if (!Number.isInteger(steps) || steps < 0 || steps > 100_000) {
+      throw new RangeError("Simulation step count must be an integer from 0 to 100000");
+    }
+    this.setRunning(false);
+    for (let index = 0; index < steps; index += 1) {
+      this.runner.runCircuit(200);
+      this.recordScope();
+    }
+    this.updateInspector();
+    return { time: this.runner.simulation.t, steps };
+  }
+
+  private getVisualRegressionLayout(): VisualRegressionLayout {
+    const box = this.canvas.getBoundingClientRect();
+    const scope = this.scopeCanvas.getBoundingClientRect();
+    const sidebar = this.root.querySelector<HTMLElement>(".control-panel")?.getBoundingClientRect();
+    const toolbar = this.root.querySelector<HTMLElement>(".tool-bar");
+    return {
+      canvas: { width: this.canvas.width, height: this.canvas.height, cssWidth: box.width, cssHeight: box.height },
+      scope: { width: this.scopeCanvas.width, height: this.scopeCanvas.height, cssWidth: scope.width, cssHeight: scope.height },
+      workspaceOrigin: { x: box.left, y: box.top },
+      workspace: { width: box.width, height: box.height },
+      sidebarX: sidebar?.left ?? box.right,
+      scopeY: scope.top,
+      toolbarVisible: toolbar !== null && !toolbar.classList.contains("hidden")
+    };
+  }
+
+  private getDynamicSnapshot(): DynamicCircuitSnapshot {
+    return {
+      time: this.runner.simulation.t,
+      timeStep: this.runner.simulation.timeStep,
+      subIterations: this.runner.simulation.subIterations,
+      running: this.running,
+      elements: this.runner.elements.map((element, index) => ({
+        index,
+        type: element.getClassName(),
+        volts: [...element.volts],
+        voltageDiff: element.getVoltageDiff(),
+        current: element.getCurrent(),
+        power: element.getPower(),
+        switchPosition: element instanceof SwitchElm ? element.position : null,
+        switchMomentary: element instanceof SwitchElm ? element.momentary : null,
+        sliderValue:
+          element instanceof VarRailElm ? element.sliderValue : null,
+        voltage: element instanceof VarRailElm ? element.getVoltage() : null,
+        position: element instanceof PotElm ? element.position : null
+      })),
+      scopes: this.scopeGroups.flatMap((group) => group.plots.map((channel) => {
+        const values = channel.samples.filter(Number.isFinite);
+        return {
+          scopeId: group.scopeId,
+          plotCount: group.plots.length,
+          name: channel.name,
+          panel: group.panel,
+          unit: channel.unit,
+          sampleCount: channel.samples.length,
+          lastSample:
+            channel.samples.length === 0
+              ? null
+              : channel.samples[channel.samples.length - 1] ?? null,
+          minimum: values.length === 0 ? null : Math.min(...values),
+          maximum: values.length === 0 ? null : Math.max(...values)
+        };
+      })),
+      scopeCount: this.scopeCount()
+    };
   }
 
   private closeMainMenus(except?: HTMLDetailsElement): boolean {
@@ -628,6 +827,12 @@ export class NativeCircuitApp {
           target.dataset.parameter,
           Number(target.value)
         );
+      } else if (target.dataset.elementRange !== undefined) {
+        this.updateElementRange(
+          target.dataset.elementRange,
+          Number(target.value),
+          target
+        );
       } else if (target.dataset.elementProperty !== undefined) {
         this.updateElementProperty(
           target.dataset.elementProperty,
@@ -639,9 +844,13 @@ export class NativeCircuitApp {
       const target = event.target;
       if (
         target instanceof HTMLInputElement &&
-        target.dataset.elementProperty !== undefined
+        (target.dataset.elementProperty !== undefined ||
+          target.dataset.elementRange !== undefined)
       ) {
         this.commitHistory();
+        if (target.dataset.elementRange !== undefined) {
+          this.updateInspector();
+        }
       }
     });
 
@@ -655,6 +864,7 @@ export class NativeCircuitApp {
       this.onPointerUp(event)
     );
     this.canvas.addEventListener("pointercancel", () => {
+      this.releaseHeldMomentarySwitch();
       this.draft = null;
       this.selectionBox = null;
       this.selectionBase.clear();
@@ -710,8 +920,10 @@ export class NativeCircuitApp {
         } catch (error) {
           this.showError(error);
         }
-      } else {
+      } else if (this.dialogApply.dataset.mode === "export") {
         void navigator.clipboard?.writeText(this.textArea.value);
+        this.textDialog.close();
+      } else {
         this.textDialog.close();
       }
     });
@@ -728,6 +940,9 @@ export class NativeCircuitApp {
     this.root
       .querySelector<HTMLButtonElement>("#subcircuit-delete")
       ?.addEventListener("click", () => this.deleteSelectedSubcircuit());
+    this.root
+      .querySelector<HTMLButtonElement>("#subcircuit-create")
+      ?.addEventListener("click", () => this.createSubcircuit());
     this.root
       .querySelector<HTMLButtonElement>("#options-apply")
       ?.addEventListener("click", () => this.applyOptionsDialog());
@@ -809,6 +1024,20 @@ export class NativeCircuitApp {
       case "import-text":
         this.openTextDialog("导入电路文本", "import", "");
         break;
+      case "import-dropbox":
+        this.openTextDialog(
+          "Dropbox 导入不可用",
+          "notice",
+          [
+            "原版 CircuitJS1 通过 Dropbox 的专用网页集成选择文件。",
+            "原生 TypeScript 版尚未集成 Dropbox，且不会把此菜单伪装成云端导入。",
+            "请先从 Dropbox 下载电路文件，再使用“打开文件…”；也可以复制内容后使用“从文本导入…”。"
+          ].join("\n\n")
+        );
+        break;
+      case "create-subcircuit":
+        this.openCreateSubcircuitDialog();
+        break;
       case "export-text":
         this.openTextDialog(
           "导出电路文本",
@@ -888,17 +1117,23 @@ export class NativeCircuitApp {
         this.fitToView();
         break;
       case "scope-stack":
+        this.stackAllScopes();
+        this.commitHistory();
+        break;
       case "scope-unstack":
+        this.unstackAllScopes();
+        this.commitHistory();
+        break;
       case "scope-separate":
-        this.scopeLayout = "separate";
-        this.syncOptionButtons();
+        this.separateAllScopes();
+        this.commitHistory();
         break;
       case "scope-combine":
-        this.scopeLayout = "combined";
-        this.syncOptionButtons();
+        this.combineAllScopes();
+        this.commitHistory();
         break;
       case "scope-reset":
-        for (const channel of this.scopeChannels) channel.samples.length = 0;
+        for (const channel of this.scopeGroups.flatMap((group) => group.plots)) channel.samples.length = 0;
         break;
       case "scope-export-csv":
         this.exportScopeCsv();
@@ -1574,19 +1809,21 @@ export class NativeCircuitApp {
     if (this.selectedIndex === null) return;
     const element = this.runner.elements[this.selectedIndex];
     const colors = ["#f1e900", "#00d83b", "#20a7ff", "#fb7185", "#c084fc"];
-    const panel =
-      Math.max(-1, ...this.scopeChannels.map((channel) => channel.panel)) +
-      1;
-    this.scopeChannels.push({
+    const panel = Math.max(-1, ...this.scopeGroups.map((group) => group.panel)) + 1;
+    const plot: ScopeChannel = {
+      elementIndex: this.selectedIndex,
+      value: 0,
       name: `${element.getClassName().replace(/Elm$/, "")} 电压`,
       elementLabel: this.scopeElementLabel(element),
       unit: "V",
-      color: colors[this.scopeChannels.length % colors.length],
-      panel,
+      color: colors[this.scopeGroups.length % colors.length],
       scale: null,
       samples: [],
       read: () => element.getVoltageDiff()
-    });
+    };
+    this.scopeGroups.push({ scopeId: this.nextScopeId(), panel, plots: [plot] });
+    this.syncScopePlots();
+    this.syncOptionButtons();
   }
 
   private swapSelectedTerminals(): void {
@@ -1792,18 +2029,90 @@ export class NativeCircuitApp {
         String(action === `drag-${this.dragMode}`)
       );
     }
-    this.root
-      .querySelector<HTMLButtonElement>('[data-action="scope-combine"]')
-      ?.setAttribute(
-        "aria-pressed",
-        String(this.scopeLayout === "combined")
+    const canArrangeScopes = this.scopeCount() >= 2;
+    const canSeparateScopes = this.scopeGroups.some((group) => group.plots.length >= 2);
+    for (const action of ["scope-stack", "scope-unstack", "scope-combine"]) {
+      const button = this.root.querySelector<HTMLButtonElement>(
+        `[data-action="${action}"]`
       );
-    this.root
-      .querySelector<HTMLButtonElement>('[data-action="scope-separate"]')
-      ?.setAttribute(
-        "aria-pressed",
-        String(this.scopeLayout === "separate")
-      );
+      if (button !== null) button.disabled = !canArrangeScopes;
+    }
+    const separateButton = this.root.querySelector<HTMLButtonElement>(
+      '[data-action="scope-separate"]'
+    );
+    if (separateButton !== null) {
+      separateButton.disabled = !(canArrangeScopes || canSeparateScopes);
+    }
+  }
+
+  private stackAllScopes(): void {
+    if (this.scopeGroups.length < 2) return;
+    for (const group of this.scopeGroups) group.panel = 0;
+    this.syncScopePlots();
+    this.syncOptionButtons();
+  }
+
+  private unstackAllScopes(): void {
+    if (this.scopeGroups.length < 2) return;
+    this.scopeGroups.forEach((group, index) => {
+      group.panel = index;
+    });
+    this.syncScopePlots();
+    this.syncOptionButtons();
+  }
+
+  private combineAllScopes(): void {
+    if (this.scopeCount() < 2) return;
+    const [first, ...rest] = this.scopeGroups;
+    if (first === undefined) return;
+    for (const group of rest) first.plots.push(...group.plots);
+    this.scopeGroups = [first];
+    this.syncScopePlots();
+    this.syncOptionButtons();
+  }
+
+  private separateAllScopes(): void {
+    if (!this.scopeGroups.some((group) => group.plots.length > 1)) return;
+    const groups: ScopeGroup[] = [];
+    for (const group of this.scopeGroups) {
+      for (const plot of group.plots) {
+        const previous = groups[groups.length - 1];
+        if (previous !== undefined && this.isVoltageCurrentPair(previous.plots, plot)) {
+          previous.plots.push(plot);
+        } else {
+          groups.push({ scopeId: groups.length, panel: groups.length, plots: [plot] });
+        }
+      }
+    }
+    this.scopeGroups = groups;
+    this.syncScopePlots();
+    this.syncOptionButtons();
+  }
+
+  private scopeCount(): number {
+    return this.scopeGroups.length;
+  }
+
+  private nextScopeId(): number {
+    return Math.max(-1, ...this.scopeGroups.map((group) => group.scopeId)) + 1;
+  }
+
+  private syncScopePlots(): void {
+    this.runner.scopePlots = this.scopeGroups.flatMap((group) =>
+      group.plots.map((plot) => ({
+        elementIndex: plot.elementIndex,
+        value: plot.value,
+        panel: group.panel,
+        scale: plot.scale,
+        scopeId: group.scopeId
+      }))
+    );
+  }
+
+  private isVoltageCurrentPair(existing: ScopeChannel[], plot: ScopeChannel): boolean {
+    const previous = existing[existing.length - 1];
+    return previous !== undefined && previous.elementIndex === plot.elementIndex &&
+      previous.unit === "V" && plot.unit === "A";
   }
 
   private getStoredOption(name: string, fallback = false): boolean {
@@ -1965,6 +2274,189 @@ export class NativeCircuitApp {
       "subcircuit-dialog",
       HTMLDialogElement
     ).showModal();
+  }
+
+  /**
+   * The legacy File > Create Subcircuit command turns labeled connection
+   * nodes into the pins of an XML <ccm> definition.  Keep that file-format
+   * boundary here in the app layer; the simulator core only consumes models.
+   */
+  private openCreateSubcircuitDialog(): void {
+    const name = this.requireElement(
+      "subcircuit-name",
+      HTMLInputElement
+    );
+    name.value = "";
+    const selection = this.selectedIndices.size > 0;
+    const description = this.root.querySelector<HTMLElement>(
+      "#subcircuit-create-description"
+    );
+    if (description !== null) {
+      description.textContent = selection
+        ? "将当前选中的元件和外部标注节点保存为子电路。"
+        : "未选择元件：将整个当前电路保存为子电路。";
+    }
+    this.requireElement(
+      "subcircuit-create-dialog",
+      HTMLDialogElement
+    ).showModal();
+    name.focus();
+  }
+
+  private createSubcircuit(): void {
+    const nameInput = this.requireElement(
+      "subcircuit-name",
+      HTMLInputElement
+    );
+    const name = nameInput.value.trim();
+    const error = this.root.querySelector<HTMLElement>(
+      "#subcircuit-create-error"
+    );
+    try {
+      if (name.length === 0) {
+        throw new Error("请输入子电路名称。");
+      }
+      if (CustomCompositeModel.get(name) !== null) {
+        throw new Error(`子电路“${name}”已存在，请使用其他名称。`);
+      }
+      const model = this.buildSubcircuitModel(name);
+      CustomCompositeModel.load(model);
+      this.runner.preservedXmlRecords = [
+        ...this.runner.preservedXmlRecords,
+        model
+      ];
+      this.runner.sourceFormat = "xml";
+      this.commitHistory();
+      this.requireElement(
+        "subcircuit-create-dialog",
+        HTMLDialogElement
+      ).close();
+      this.openSubcircuitDialog();
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      if (error !== null) error.textContent = message;
+    }
+  }
+
+  private buildSubcircuitModel(name: string): XmlRecord {
+    this.runner.analyzeCircuit();
+    const selected = this.selectedIndices.size > 0
+      ? this.selectedIndices
+      : null;
+    const elements = this.runner.elements.filter(
+      (_element, index) => selected === null || selected.has(index)
+    );
+    const labels = elements.filter(
+      (element): element is LabeledNodeElm =>
+        element instanceof LabeledNodeElm && !element.isInternal()
+    );
+    if (labels.length === 0) {
+      throw new Error(
+        "创建子电路需要至少一个外部标注节点。请用“标注节点”工具给输入或输出命名。"
+      );
+    }
+
+    const sideLabels = [[], [], [], []] as LabeledNodeElm[][];
+    const sideFor = (element: LabeledNodeElm): number => {
+      if (Math.abs(element.dx) >= Math.abs(element.dy) && element.dx > 0) return 3;
+      if (Math.abs(element.dx) <= Math.abs(element.dy) && element.dy < 0) return 0;
+      if (Math.abs(element.dx) <= Math.abs(element.dy) && element.dy > 0) return 1;
+      return 2;
+    };
+    for (const label of labels) sideLabels[sideFor(label)]?.push(label);
+    // Match SimulationManager.getCircuitAsComposite(): north/south pins are
+    // ordered left-to-right (x); west/east pins top-to-bottom (y).
+    const axis = (side: number) => (element: LabeledNodeElm) =>
+      side === 0 || side === 1 ? element.x : element.y;
+    sideLabels.forEach((list, side) => list.sort((a, b) => axis(side)(a) - axis(side)(b)));
+
+    const pins: XmlRecord[] = [];
+    const seenNodes = new Set<number>();
+    for (let side = 0; side < sideLabels.length; side += 1) {
+      for (const [position, label] of (sideLabels[side] ?? []).entries()) {
+        for (let bit = 0; bit < label.busWidth; bit += 1) {
+          const node = label.getNode(bit)?.index ?? 0;
+          if (node === 0) {
+            throw new Error(`节点“${label.text}”不能连接到地。`);
+          }
+          if (seenNodes.has(node)) {
+            throw new Error(
+              `外部标注节点“${label.text}”与另一个引脚连接到同一节点。`
+            );
+          }
+          seenNodes.add(node);
+          const used = elements.some(
+            (element) =>
+              element !== label &&
+              Array.from({ length: element.getPostCount() }, (_, post) =>
+                element.getNode(post)?.index
+              ).includes(node)
+          );
+          if (!used) {
+            throw new Error(`节点“${label.text}”未连接到子电路中的元件。`);
+          }
+          pins.push({
+            tagName: "ext",
+            attributes: {
+              nm: label.text,
+              nd: String(node),
+              ps: String(position),
+              sd: String(side),
+              ...(label.busWidth > 1 ? { bw: String(label.busWidth), bz: String(bit) } : {})
+            },
+            contents: null,
+            children: [],
+            kind: "unknown"
+          });
+        }
+      }
+    }
+
+    const sideCounts = sideLabels.map((list) => list.length);
+    const widthOffset = (sideCounts[2] ?? 0) > 0 ? 1 : 0;
+    const rightOffset = (sideCounts[3] ?? 0) > 0 ? 1 : 0;
+    const minimumHeight = (sideCounts[0] ?? 0) > 0 && (sideCounts[1] ?? 0) > 0
+      ? 2
+      : 1;
+    return {
+      tagName: "ccm",
+      attributes: {
+        nm: name,
+        f: "0",
+        sx: String(Math.max(2, (sideCounts[0] ?? 0), (sideCounts[1] ?? 0)) + widthOffset + rightOffset),
+        sy: String(Math.max(minimumHeight, (sideCounts[2] ?? 0), (sideCounts[3] ?? 0)))
+      },
+      contents: null,
+      children: [
+        ...pins,
+        ...elements.map((element) => this.subcircuitElementRecord(element))
+      ],
+      kind: "model"
+    };
+  }
+
+  private subcircuitElementRecord(element: CircuitElm): XmlRecord {
+    const document = globalThis.document.implementation.createDocument(
+      "",
+      element.getXmlDumpType()
+    );
+    const xml = document.documentElement;
+    element.dumpXml(document, xml);
+    xml.setAttribute(
+      "nn",
+      Array.from({ length: element.getPostCount() }, (_, index) =>
+        String(element.getNode(index)?.index ?? 0)
+      ).join(" ")
+    );
+    return {
+      tagName: xml.tagName,
+      attributes: Object.fromEntries(
+        Array.from(xml.attributes, (attribute) => [attribute.name, attribute.value])
+      ),
+      contents: xml.firstChild?.nodeValue ?? null,
+      children: [],
+      kind: "element"
+    };
   }
 
   private deleteSelectedSubcircuit(): void {
@@ -2412,6 +2904,9 @@ export class NativeCircuitApp {
       !this.editDisabled
     ) {
       selected.toggle();
+      if (selected instanceof SwitchElm && selected.momentary) {
+        this.heldMomentarySwitch = selected;
+      }
       this.runner.analyzed = false;
       this.commitHistory();
     } else if (
@@ -2503,6 +2998,10 @@ export class NativeCircuitApp {
   }
 
   private onPointerUp(event: PointerEvent): void {
+    if (this.heldMomentarySwitch !== null) {
+      this.releaseHeldMomentarySwitch();
+      return;
+    }
     if (this.panStart !== null) {
       this.panStart = null;
       return;
@@ -2535,6 +3034,16 @@ export class NativeCircuitApp {
       return;
     }
     this.addElement(this.activeTool, draft.start, draft.end);
+  }
+
+  /** Matches SwitchElm.mouseUp() in the legacy MouseManager. */
+  private releaseHeldMomentarySwitch(): void {
+    if (this.heldMomentarySwitch === null) return;
+    this.heldMomentarySwitch.toggle();
+    this.heldMomentarySwitch = null;
+    this.runner.analyzed = false;
+    this.commitHistory();
+    this.updateInspector();
   }
 
   private updateSelectionBox(end: Point): void {
@@ -2796,13 +3305,53 @@ export class NativeCircuitApp {
     this.runner.analyzed = false;
   }
 
+  /**
+   * Applies the value of an element-owned range control.  These controls are
+   * deliberately part of the regular inspector rather than the test API, so
+   * automated dynamic checks exercise the same browser input path as a user.
+   */
+  private updateElementRange(
+    range: string,
+    value: number,
+    input: HTMLInputElement
+  ): void {
+    if (
+      this.editDisabled ||
+      !Number.isFinite(value) ||
+      this.selectedIndex === null
+    ) {
+      return;
+    }
+    const element = this.runner.elements[this.selectedIndex];
+    const output = input
+      .closest("label")
+      ?.querySelector<HTMLOutputElement>("output");
+    if (element instanceof VarRailElm && range === "var-rail-voltage") {
+      element.setSliderValue(value);
+      if (output !== null && output !== undefined) {
+        const voltage =
+          element.bias +
+          (element.sliderValue / 100) * (element.maxVoltage - element.bias);
+        output.textContent = CircuitElm.getVoltageText(voltage);
+      }
+    } else if (element instanceof PotElm && range === "potentiometer") {
+      element.setSliderPosition(0.005 + (Math.max(0, Math.min(100, value)) / 100) * 0.99);
+      if (output !== null && output !== undefined) {
+        output.textContent = `${Math.round(element.position * 100)}%`;
+      }
+    } else {
+      return;
+    }
+    this.runner.analyzed = false;
+  }
+
   private resetSimulation(): void {
     this.runner.resetTime();
     for (const element of this.runner.elements) {
       element.reset();
     }
     this.runner.analyzed = false;
-    for (const channel of this.scopeChannels) {
+    for (const channel of this.scopeGroups.flatMap((group) => group.plots)) {
       channel.samples.length = 0;
     }
     this.errorMessage = null;
@@ -2829,6 +3378,7 @@ export class NativeCircuitApp {
   }
 
   private serializeCircuit(): string {
+    this.syncScopePlots();
     if (this.runner.sourceFormat === "xml") {
       return this.serializeXmlCircuit();
     }
@@ -2842,13 +3392,28 @@ export class NativeCircuitApp {
         return type === "!" || type === "." || type === '"';
       }
     );
-    const otherRecords = this.runner.preservedTextRecords.filter(
-      (record) => !modelRecords.includes(record)
-    );
+    const otherRecords = this.runner.preservedTextRecords.filter((record) => {
+      if (modelRecords.includes(record)) return false;
+      return record.trimStart().split(/\s+/, 1)[0] !== "o";
+    });
+    const scopeRecords = this.scopeGroups.map((group) => {
+      const first = group.plots[0];
+      if (first === undefined) return "";
+      const hasMultiplePlots = group.plots.length > 1;
+      const flags = hasMultiplePlots ? 4096 : 0;
+      const voltageScale = group.plots.find((plot) => plot.value !== 3)?.scale ?? 0;
+      const currentScale = group.plots.find((plot) => plot.value === 3)?.scale ?? 0;
+      return [
+        "o", first.elementIndex, 64, first.value, flags, voltageScale,
+        currentScale, group.panel,
+        ...(hasMultiplePlots ? [group.plots.length, ...group.plots.slice(1).flatMap((plot) => [plot.elementIndex, plot.value])] : [])
+      ].join(" ");
+    }).filter(Boolean);
     return [
       options,
       ...modelRecords,
       ...this.runner.elements.map((element) => element.dump()),
+      ...scopeRecords,
       ...otherRecords
     ].join("\n");
   }
@@ -2878,7 +3443,7 @@ export class NativeCircuitApp {
       (record) => record.kind === "model"
     );
     const otherRecords = this.runner.preservedXmlRecords.filter(
-      (record) => record.kind !== "model"
+      (record) => record.kind !== "model" && record.kind !== "scope"
     );
     for (const record of modelRecords) {
       root.append(this.xmlRecordToElement(document, record));
@@ -2889,6 +3454,21 @@ export class NativeCircuitApp {
       );
       element.dumpXml(document, xmlElement);
       root.append(xmlElement);
+    }
+    for (const group of this.scopeGroups) {
+      const first = group.plots[0];
+      if (first === undefined) continue;
+      const scope = document.createElement("o");
+      scope.setAttribute("en", String(first.elementIndex));
+      scope.setAttribute("p", String(group.panel));
+      for (const plot of group.plots) {
+        const child = document.createElement("p");
+        child.setAttribute("e", String(plot.elementIndex));
+        child.setAttribute("v", String(plot.value));
+        if (plot.scale !== null) child.setAttribute("sc", String(plot.scale));
+        scope.append(child);
+      }
+      root.append(scope);
     }
     for (const record of otherRecords) {
       root.append(this.xmlRecordToElement(document, record));
@@ -3061,10 +3641,10 @@ export class NativeCircuitApp {
   private exportScopeCsv(): void {
     const length = Math.max(
       0,
-      ...this.scopeChannels.map((channel) => channel.samples.length)
+      ...this.scopeGroups.flatMap((group) => group.plots).map((channel) => channel.samples.length)
     );
     const rows = [
-      ["sample", ...this.scopeChannels.map((channel) => channel.name)].join(
+      ["sample", ...this.scopeGroups.flatMap((group) => group.plots).map((channel) => channel.name)].join(
         ","
       )
     ];
@@ -3072,7 +3652,7 @@ export class NativeCircuitApp {
       rows.push(
         [
           index,
-          ...this.scopeChannels.map(
+          ...this.scopeGroups.flatMap((group) => group.plots).map(
             (channel) => channel.samples[index] ?? ""
           )
         ].join(",")
@@ -3115,17 +3695,17 @@ export class NativeCircuitApp {
 
   private openTextDialog(
     title: string,
-    mode: "import" | "export",
+    mode: "import" | "export" | "notice",
     value: string
   ): void {
     this.dialogTitle.textContent = title;
     this.dialogApply.dataset.mode = mode;
-    this.dialogApply.textContent = mode === "import" ? "载入" : "复制";
+    this.dialogApply.textContent = mode === "import" ? "载入" : mode === "export" ? "复制" : "知道了";
     this.textArea.value = value;
-    this.textArea.readOnly = mode === "export";
+    this.textArea.readOnly = mode !== "import";
     this.textDialog.showModal();
     this.textArea.focus();
-    if (mode === "export") {
+    if (mode !== "import") {
       this.textArea.select();
     }
   }
@@ -3139,18 +3719,19 @@ export class NativeCircuitApp {
       .filter((plot) => plot.element !== undefined)
       .filter((plot) => plot.panel < 3);
     if (scopedPlots.length > 0) {
-      this.scopeChannels = scopedPlots.map((plot) => {
+      const plots = scopedPlots.map((plot) => {
         const className = plot.element
           .getClassName()
           .replace(/Elm$/, "");
         const elementLabel = this.scopeElementLabel(plot.element);
         if (plot.value === 3) {
           return {
+            elementIndex: plot.elementIndex,
+            value: plot.value,
             name: `${className} 电流`,
             elementLabel,
             unit: "A",
             color: "#00d83b",
-            panel: plot.panel,
             scale: plot.scale,
             samples: [],
             read: () => plot.element.getCurrent()
@@ -3158,27 +3739,34 @@ export class NativeCircuitApp {
         }
         if (plot.value === 7) {
           return {
+            elementIndex: plot.elementIndex,
+            value: plot.value,
             name: `${className} 功率`,
             elementLabel,
             unit: "W",
             color: "#20a7ff",
-            panel: plot.panel,
             scale: plot.scale,
             samples: [],
             read: () => plot.element.getPower()
           };
         }
         return {
+          elementIndex: plot.elementIndex,
+          value: plot.value,
           name: `${className} 电压`,
           elementLabel,
           unit: "V",
           color: "#f1e900",
-          panel: plot.panel,
           scale: plot.scale,
           samples: [],
           read: () => plot.element.getVoltageDiff()
         };
       });
+      this.scopeGroups = [...new Map(scopedPlots.map((plot) => [
+        plot.scopeId,
+        { scopeId: plot.scopeId, panel: plot.panel, plots: plots.filter((_, index) => scopedPlots[index]?.scopeId === plot.scopeId) }
+      ])).values()];
+      this.syncOptionButtons();
       return;
     }
     const capacitor = this.runner.elements.find(
@@ -3196,11 +3784,12 @@ export class NativeCircuitApp {
     const channels: ScopeChannel[] = [];
     if (capacitor !== undefined) {
       channels.push({
+        elementIndex: this.runner.elements.indexOf(capacitor),
+        value: 0,
         name: "电容电压",
         elementLabel: "电容器",
         unit: "V",
         color: "#f1e900",
-        panel: 0,
         scale: null,
         samples: [],
         read: () => capacitor.getVoltageDiff()
@@ -3208,11 +3797,12 @@ export class NativeCircuitApp {
     }
     if (inductor !== undefined) {
       channels.push({
+        elementIndex: this.runner.elements.indexOf(inductor),
+        value: 3,
         name: "电感电流",
         elementLabel: "电感器",
         unit: "A",
         color: "#00d83b",
-        panel: 1,
         scale: null,
         samples: [],
         read: () => inductor.getCurrent()
@@ -3220,17 +3810,19 @@ export class NativeCircuitApp {
     }
     if (resistor !== undefined) {
       channels.push({
+        elementIndex: this.runner.elements.indexOf(resistor),
+        value: 0,
         name: "电阻电压",
         elementLabel: "电阻器",
         unit: "V",
         color: "#20a7ff",
-        panel: 2,
         scale: null,
         samples: [],
         read: () => resistor.getVoltageDiff()
       });
     }
-    this.scopeChannels = channels;
+    this.scopeGroups = channels.map((plot, index) => ({ scopeId: index, panel: index, plots: [plot] }));
+    this.syncOptionButtons();
   }
 
   private scopeElementLabel(element: CircuitElm): string {
@@ -3311,7 +3903,7 @@ export class NativeCircuitApp {
   }
 
   private recordScope(): void {
-    for (const channel of this.scopeChannels) {
+    for (const channel of this.scopeGroups.flatMap((group) => group.plots)) {
       channel.samples.push(channel.read());
       if (channel.samples.length > 720) {
         channel.samples.shift();
@@ -3327,19 +3919,11 @@ export class NativeCircuitApp {
     context.clearRect(0, 0, width, height);
     context.fillStyle = this.renderer.whiteBackground ? "#ffffff" : "#101010";
     context.fillRect(0, 0, width, height);
-    const combined = this.scopeLayout === "combined";
-    const panelCount = combined
-      ? 1
-      : Math.max(
-          1,
-          ...this.scopeChannels.map((channel) => channel.panel + 1)
-        );
-    const panelWidth = combined
-      ? width
-      : width / panelCount;
+    const panelCount = Math.max(1, ...this.scopeGroups.map((group) => group.panel + 1));
+    const panelWidth = width / panelCount;
 
     for (let panel = 0; panel < panelCount; panel += 1) {
-      const x = combined ? 0 : panel * panelWidth;
+      const x = panel * panelWidth;
       context.save();
       context.beginPath();
       context.rect(x, 0, panelWidth, height);
@@ -3352,7 +3936,7 @@ export class NativeCircuitApp {
       context.moveTo(x, height / 2);
       context.lineTo(x + panelWidth, height / 2);
       context.stroke();
-      if (!combined && panel > 0) {
+      if (panel > 0) {
         context.beginPath();
         context.moveTo(x, 0);
         context.lineTo(x, height);
@@ -3361,9 +3945,9 @@ export class NativeCircuitApp {
       context.restore();
     }
 
-    this.scopeChannels.forEach((channel, channelIndex) => {
-      const panel = combined ? 0 : channel.panel;
-      const x = combined ? 0 : panel * panelWidth;
+    this.scopeGroups.forEach((group) => group.plots.forEach((channel, channelIndex) => {
+      const panel = group.panel;
+      const x = panel * panelWidth;
       context.save();
       context.beginPath();
       context.rect(x, 0, panelWidth, height);
@@ -3390,32 +3974,21 @@ export class NativeCircuitApp {
       });
       context.stroke();
 
-      const isFirstInPanel =
-        this.scopeChannels.findIndex(
-          (candidate) => candidate.panel === channel.panel
-        ) === channelIndex;
-      if (combined || isFirstInPanel) {
+      if (channelIndex === 0) {
         context.fillStyle = this.renderer.whiteBackground
           ? "#111827"
           : "#f3f4f6";
         context.font = "12px Arial";
-        const label = combined
-          ? `${channel.name}  Max=${CircuitElm.getShortUnitText(
-              max,
-              channel.unit
-            )}`
-          : `Max=${CircuitElm.getShortUnitText(max, channel.unit)}`;
+        const label = `Max=${CircuitElm.getShortUnitText(max, channel.unit)}`;
         context.fillText(
           label,
           x + 8,
-          combined ? 17 + channelIndex * 15 : 17
+          17
         );
-        if (!combined) {
-          context.fillText(channel.elementLabel, x + 8, 32);
-        }
+        context.fillText(channel.elementLabel, x + 8, 32);
       }
       context.restore();
-    });
+    }));
   }
 
   private updateInspector(): void {
@@ -3864,7 +4437,9 @@ export class NativeCircuitApp {
       );
     }
 
+    const rangeControls = this.createElementRangeControls(element);
     container.replaceChildren(
+      ...rangeControls,
       ...properties.map((property) => {
         const label = document.createElement("label");
         label.className = "property-row";
@@ -3984,6 +4559,57 @@ export class NativeCircuitApp {
       });
       container.append(button);
     }
+  }
+
+  private createElementRangeControls(element: CircuitElm | null): HTMLElement[] {
+    if (element instanceof VarRailElm) {
+      const label = document.createElement("label");
+      label.className = "property-row property-range";
+      const text = document.createElement("span");
+      text.textContent = element.sliderText;
+      const field = document.createElement("span");
+      field.className = "property-field";
+      const input = document.createElement("input");
+      input.type = "range";
+      input.min = "0";
+      input.max = "100";
+      input.step = "1";
+      input.value = String(element.sliderValue);
+      input.dataset.elementRange = "var-rail-voltage";
+      input.setAttribute("aria-label", element.sliderText);
+      const output = document.createElement("output");
+      output.textContent = CircuitElm.getVoltageText(
+        element.bias +
+          (element.sliderValue / 100) * (element.maxVoltage - element.bias)
+      );
+      field.append(input, output);
+      label.append(text, field);
+      return [label];
+    }
+    if (element instanceof PotElm) {
+      const label = document.createElement("label");
+      label.className = "property-row property-range";
+      const text = document.createElement("span");
+      text.textContent = element.sliderText;
+      const field = document.createElement("span");
+      field.className = "property-field";
+      const input = document.createElement("input");
+      input.type = "range";
+      input.min = "0";
+      input.max = "100";
+      input.step = "1";
+      input.value = String(
+        Math.round(((element.position - 0.005) / 0.99) * 100)
+      );
+      input.dataset.elementRange = "potentiometer";
+      input.setAttribute("aria-label", element.sliderText);
+      const output = document.createElement("output");
+      output.textContent = `${Math.round(element.position * 100)}%`;
+      field.append(input, output);
+      label.append(text, field);
+      return [label];
+    }
+    return [];
   }
 
   private setParameterSlider(
@@ -4380,6 +5006,7 @@ export class NativeCircuitApp {
             <button data-action="new">新建空白电路 <kbd>Ctrl+N</kbd></button>
             <button data-action="open">打开文件… <kbd>Ctrl+O</kbd></button>
             <button data-action="import-text">从文本导入…</button>
+            <button data-action="import-dropbox">从 Dropbox 导入…</button>
             <hr>
             <button data-action="save">另存为文件… <kbd>Ctrl+S</kbd></button>
             <button data-action="export-link">导出为链接…</button>
@@ -4387,6 +5014,7 @@ export class NativeCircuitApp {
             <button data-action="export-image">导出为图片…</button>
             <button data-action="copy-image">复制电路图片</button>
             <button data-action="export-svg">导出为 SVG…</button>
+            <button data-action="create-subcircuit">创建子电路…</button>
             <hr>
             <button data-action="dc-analysis">查找直流工作点</button>
             <button data-action="recover">恢复自动保存</button>
@@ -4622,6 +5250,26 @@ export class NativeCircuitApp {
             <button type="button" data-dialog-close>完成</button>
           </footer>
         </div>
+      </dialog>
+      <dialog id="subcircuit-create-dialog" class="settings-dialog">
+        <form method="dialog" class="settings-dialog-body">
+          <header>
+            <div>
+              <h2>创建子电路</h2>
+              <p id="subcircuit-create-description"></p>
+            </div>
+            <button type="button" data-dialog-close aria-label="关闭">×</button>
+          </header>
+          <label>子电路名称
+            <input id="subcircuit-name" type="text" required autocomplete="off">
+          </label>
+          <p>外部引脚来自“标注节点”元件；每个标注节点必须连接到电路。</p>
+          <p id="subcircuit-create-error" class="dialog-error" role="alert"></p>
+          <footer>
+            <button type="button" data-dialog-close>取消</button>
+            <button type="button" id="subcircuit-create" class="primary">创建</button>
+          </footer>
+        </form>
       </dialog>
       <dialog id="options-dialog" class="settings-dialog">
         <form id="options-form" class="settings-dialog-body">

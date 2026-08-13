@@ -177,6 +177,18 @@ export function getSwitchInteractionBounds(
   );
 }
 
+function isLogicInputHotZone(
+  element: CircuitElm,
+  model: { x: number; y: number }
+): boolean {
+  if (!(element instanceof LogicInputElm || element instanceof BusLogicInputElm)) {
+    return false;
+  }
+  // Matches the legacy getSwitchRect(): the visible logic label is a 20x20
+  // model-space control centred at point2, not the attached wire segment.
+  return Math.abs(model.x - element.x2) <= 10 && Math.abs(model.y - element.y2) <= 10;
+}
+
 export class CircuitCanvasRenderer {
   public showCurrent = true;
   public showVoltage = true;
@@ -280,6 +292,11 @@ export class CircuitCanvasRenderer {
     let bestDistance = Number.POSITIVE_INFINITY;
 
     elements.forEach((element, index) => {
+      if (isLogicInputHotZone(element, model)) {
+        bestDistance = -1;
+        bestIndex = index;
+        return;
+      }
       if (element instanceof SwitchElm) {
         const bounds = getSwitchInteractionBounds(
           element,

@@ -19,15 +19,16 @@ const errorText = (error) => error instanceof Error ? error.message : String(err
 const filesFor = (output, stem) => ({ legacy: join(output, "legacy", `${stem}.png`), ts: join(output, "ts", `${stem}.png`), diff: join(output, "diff", `${stem}.png`) });
 
 function optionsFrom(args) {
-  const result = { output: DEFAULT_OUTPUT, limit: undefined, keepOutput: false, diff: true, headed: false, strict: false };
+  const result = { output: DEFAULT_OUTPUT, limit: undefined, only: undefined, keepOutput: false, diff: true, headed: false, strict: false };
   for (const arg of args) {
-    if (arg === "--help") { console.log("Options: --limit=N --output=PATH --headed --no-diff --keep-output"); process.exit(0); }
+    if (arg === "--help") { console.log("Options: --limit=N --only=id[,id] --output=PATH --headed --no-diff --keep-output"); process.exit(0); }
     if (arg === "--keep-output") result.keepOutput = true;
     else if (arg === "--strict") result.strict = true;
     else if (arg === "--no-diff") result.diff = false;
     else if (arg === "--headed") result.headed = true;
     else if (arg.startsWith("--output=")) result.output = resolve(ROOT, arg.slice(9));
     else if (arg.startsWith("--limit=")) { result.limit = Number(arg.slice(8)); if (!Number.isInteger(result.limit) || result.limit < 1) throw new Error("--limit must be a positive integer"); }
+    else if (arg.startsWith("--only=")) { result.only = new Set(arg.slice(7).split(",").filter(Boolean)); if (result.only.size === 0) throw new Error("--only must name at least one fixture"); }
     else throw new Error(`Unknown argument: ${arg}`);
   }
   return result;
@@ -68,6 +69,56 @@ async function stableCanvas(page) {
     return document.fonts.status === "loaded" && canvas.getBoundingClientRect().width > 0;
   }, undefined, { timeout: 10_000 });
 }
+function sameGeometry(left, right, tolerance = 1) {
+  return Math.abs(left - right) <= tolerance;
+}
+function visualLayoutStatus(layout) {
+  const values = [layout?.canvas?.width, layout?.canvas?.height, layout?.canvas?.cssWidth, layout?.canvas?.cssHeight, layout?.workspaceOrigin?.x, layout?.workspaceOrigin?.y, layout?.sidebarX, layout?.scopeY];
+  return values.every(Number.isFinite) && layout.toolbarVisible === true;
+}
+function comparableLayout(legacy, ts) {
+  const checks = {
+    toolbarVisible: legacy.toolbarVisible === ts.toolbarVisible,
+    canvasWidth: sameGeometry(legacy.canvas.width, ts.canvas.width),
+    canvasHeight: sameGeometry(legacy.canvas.height, ts.canvas.height),
+    cssWidth: sameGeometry(legacy.canvas.cssWidth, ts.canvas.cssWidth),
+    cssHeight: sameGeometry(legacy.canvas.cssHeight, ts.canvas.cssHeight),
+    workspaceOriginX: sameGeometry(legacy.workspaceOrigin.x, ts.workspaceOrigin.x),
+    // The two real products currently keep a 3px menu/tool-strip offset.
+    // Normalize its *coordinate frame* in the report/crops; do not move or
+    // hide either UI merely to make screenshots look alike.
+    workspaceOriginY: Number.isFinite(legacy.workspaceOrigin.y) && Number.isFinite(ts.workspaceOrigin.y),
+    sidebarX: sameGeometry(legacy.sidebarX, ts.sidebarX),
+    scopeY: sameGeometry(legacy.scopeY - legacy.workspaceOrigin.y, ts.scopeY - ts.workspaceOrigin.y)
+  };
+  return { valid: Object.values(checks).every(Boolean), checks };
+}
+function visualRegions(layout) {
+  const width = VIEWPORT.width, height = VIEWPORT.height;
+  const workspaceX = Math.max(0, Math.round(layout.workspaceOrigin.x)), workspaceY = Math.max(0, Math.round(layout.workspaceOrigin.y));
+  const sidebarX = Math.min(width, Math.max(workspaceX, Math.round(layout.sidebarX))), scopeY = Math.min(height, Math.max(workspaceY, Math.round(layout.scopeY)));
+  return {
+    top: { x: 0, y: 0, width, height: workspaceY },
+    workspace: { x: workspaceX, y: workspaceY, width: sidebarX - workspaceX, height: scopeY - workspaceY },
+    right: { x: sidebarX, y: workspaceY, width: width - sidebarX, height: height - workspaceY },
+    bottom: { x: workspaceX, y: scopeY, width: sidebarX - workspaceX, height: height - scopeY }
+  };
+}
+function normalizedVisualRegions(legacy, ts) {
+  const workspaceY = Math.max(legacy.workspaceOrigin.y, ts.workspaceOrigin.y);
+  const sidebarX = Math.min(legacy.sidebarX, ts.sidebarX);
+  const scopeY = workspaceY + Math.min(
+    legacy.scopeY - legacy.workspaceOrigin.y,
+    ts.scopeY - ts.workspaceOrigin.y
+  );
+  const width = VIEWPORT.width, height = VIEWPORT.height;
+  return {
+    top: { x: 0, y: 0, width, height: workspaceY },
+    workspace: { x: 0, y: workspaceY, width: sidebarX, height: scopeY - workspaceY },
+    right: { x: sidebarX, y: workspaceY, width: width - sidebarX, height: height - workspaceY },
+    bottom: { x: 0, y: scopeY, width: sidebarX, height: height - scopeY }
+  };
+}
 async function legacyLoad(page, baseUrl, id, source) {
   const expectedPath = `/legacy/circuitjs1/circuits/${id}`;
   const requested = page.waitForResponse((response) => new URL(response.url()).pathname === expectedPath, { timeout: 20_000 });
@@ -81,28 +132,45 @@ async function legacyLoad(page, baseUrl, id, source) {
     const pause = [...document.querySelectorAll("input[type=checkbox]")]
       .find((input) => /pause|stop/i.test(input.getAttribute("title") ?? ""));
     if (pause instanceof HTMLInputElement && !pause.checked) pause.click();
-    // The native layout reserves its sidebar and exposes a 1106x665 drawing
-    // surface at the standard 1280x900 viewport. Capture the GWT canvas in
-    // that same CSS box so page screenshots compare the same drawing region.
-    const canvases = [...document.querySelectorAll("canvas")];
-    const canvas = canvases.sort((a, b) => b.getBoundingClientRect().width * b.getBoundingClientRect().height - a.getBoundingClientRect().width * a.getBoundingClientRect().height)[0];
-    if (canvas instanceof HTMLCanvasElement) { canvas.style.width = "1106px"; canvas.style.height = "665px"; }
+    if (typeof window.CircuitJS1?.setVisualRegressionLayout !== "function") throw new Error("Legacy visual layout bridge missing; rebuild the GWT baseline");
+    // 1280px viewport - 174px TS sidebar = 1106px. The GWT layout API does
+    // the real backing-store resize; do not alter canvas CSS from the test.
+    window.CircuitJS1.setVisualRegressionLayout(174, 665, true);
   });
   await stableCanvas(page);
-  return { requestedPath: expectedPath, sourceSha256: sha(actual), paused: true, canvas: await page.locator("canvas").evaluateAll((items) => {
-    const canvas = items.filter((item) => item.getBoundingClientRect().width > 0 && item.getBoundingClientRect().height > 0)
-      .sort((a, b) => b.getBoundingClientRect().width * b.getBoundingClientRect().height - a.getBoundingClientRect().width * a.getBoundingClientRect().height)[0];
-    if (!(canvas instanceof HTMLCanvasElement)) throw new Error("No visible legacy canvas");
-    const box = canvas.getBoundingClientRect(); return { width: canvas.width, height: canvas.height, cssWidth: box.width, cssHeight: box.height, normalizedCssSize: "1106x665" };
-  }) };
+  const layout = await page.evaluate(() => window.CircuitJS1.getVisualRegressionLayout?.());
+  if (!visualLayoutStatus(layout)) throw new Error(`Invalid legacy visual layout: ${JSON.stringify(layout)}`);
+  return { requestedPath: expectedPath, sourceSha256: sha(actual), paused: true, canvas: layout.canvas, visualLayout: layout };
 }
-function elementsIn(source) { return source.split(/\r?\n/).filter((line) => !["", "$", "o", "#"].includes(line.trim().charAt(0))).length; }
+function textElementsIn(source) {
+  return source
+    .split(/\r?\n/)
+    .filter((line) => {
+      const type = line.trim().split(/\s+/, 1)[0] ?? "";
+      return !["", "$", "o", "h", "!", ".", '"', "&", "%", "?", "B"].includes(type);
+    }).length;
+}
+async function expectedElementsIn(page, source) {
+  if (!source.trimStart().startsWith("<")) return textElementsIn(source);
+  return page.evaluate((input) => {
+    const document = new DOMParser().parseFromString(input, "application/xml");
+    if (document.querySelector("parsererror") !== null) {
+      throw new Error("Invalid XML fixture");
+    }
+    // CircuitRunner creates one top-level element for every direct <cir>
+    // child with an x position. Nested <ccm> model definitions, <o>/<p>
+    // scope data and text contents are state, not runner elements.
+    return [...document.documentElement.children].filter((element) =>
+      element.hasAttribute("x")
+    ).length;
+  }, source);
+}
 async function tsLoad(page, baseUrl, source) {
   await page.goto(baseUrl, { waitUntil: "networkidle", timeout: 30_000 });
   await page.waitForFunction(() => typeof window.CircuitJS1TS?.loadCircuit === "function", undefined, { timeout: 20_000 });
   await page.evaluate((input) => window.CircuitJS1TS.loadCircuit(input), source);
   const state = await page.evaluate(() => { window.CircuitJS1TS.setRunning(false); const exported = window.CircuitJS1TS.exportCircuit(); return { elementCount: window.CircuitJS1TS.getElements().length, exportedLength: exported.length, exportedPrefix: exported.slice(0, 160), exportedCircuit: exported }; });
-  const expectedElementCount = elementsIn(source); if (state.elementCount !== expectedElementCount) throw new Error(`TS element count mismatch: expected ${expectedElementCount}, got ${state.elementCount}`);
+  const expectedElementCount = await expectedElementsIn(page, source); if (state.elementCount !== expectedElementCount) throw new Error(`TS element count mismatch: expected ${expectedElementCount}, got ${state.elementCount}`);
   await stableCanvas(page);
   const { exportedCircuit, ...summary } = state;
   const canvas = await page.locator("canvas").evaluateAll((items) => {
@@ -111,7 +179,9 @@ async function tsLoad(page, baseUrl, source) {
     if (!(item instanceof HTMLCanvasElement)) throw new Error("No visible TypeScript canvas");
     const box = item.getBoundingClientRect(); return { width: item.width, height: item.height, cssWidth: box.width, cssHeight: box.height };
   });
-  return { inputSha256: sha(source), expectedElementCount, ...summary, exportedSha256: sha(exportedCircuit), paused: true, canvas };
+  const visualLayout = await page.evaluate(() => window.CircuitJS1TS.getVisualRegressionLayout?.());
+  if (!visualLayoutStatus(visualLayout)) throw new Error(`Invalid TypeScript visual layout: ${JSON.stringify(visualLayout)}`);
+  return { inputSha256: sha(source), expectedElementCount, ...summary, exportedSha256: sha(exportedCircuit), paused: true, canvas, visualLayout };
 }
 async function verifyMenu(page, app, entry, index) {
   const [id, legacyText, tsText, key] = entry;
@@ -129,16 +199,29 @@ async function verifyMenu(page, app, entry, index) {
   await popup.waitFor({ state: "visible", timeout: 10_000 }); const keyItem = (await popup.locator(".gwt-MenuItem").first().textContent())?.trim() ?? "";
   if (!keyItem) throw new Error(`Legacy ${id} menu has no visible key item`); return { labels: texts, keyItem };
 }
-async function diff(context, legacyPath, tsPath, outputPath) {
+async function diff(context, legacyPath, tsPath, outputPath, crop = undefined, offsets = undefined) {
   const [legacy, ts] = await Promise.all([readFile(legacyPath), readFile(tsPath)]), page = await context.newPage({ viewport: VIEWPORT });
-  await page.setContent(`<!doctype html><canvas></canvas><script type="module">const a=new Image(),b=new Image();a.src=${JSON.stringify(`data:image/png;base64,${legacy.toString("base64")}`)};b.src=${JSON.stringify(`data:image/png;base64,${ts.toString("base64")}`)};await Promise.all([a.decode(),b.decode()]);const c=document.querySelector('canvas'),x=c.getContext('2d',{willReadFrequently:true});c.width=Math.max(a.width,b.width);c.height=Math.max(a.height,b.height);x.drawImage(a,0,0);const l=x.getImageData(0,0,c.width,c.height);x.clearRect(0,0,c.width,c.height);x.drawImage(b,0,0);const r=x.getImageData(0,0,c.width,c.height),o=x.createImageData(c.width,c.height);let changed=0,sum=0;for(let i=0;i<o.data.length;i+=4){let any=false;for(let j=0;j<3;j++){const d=Math.abs(l.data[i+j]-r.data[i+j]);o.data[i+j]=d;sum+=d;any||=d!==0}o.data[i+3]=255;changed+=Number(any)}x.putImageData(o,0,0);document.body.dataset.metrics=JSON.stringify({pixelCount:c.width*c.height,changedPixels:changed,diffPixelRatio:changed/(c.width*c.height),mae:sum/(c.width*c.height*3*255)})</script>`);
+  await page.setContent(`<!doctype html><canvas></canvas><script type="module">const a=new Image(),b=new Image(),crop=${JSON.stringify(crop)},offsets=${JSON.stringify(offsets)};a.src=${JSON.stringify(`data:image/png;base64,${legacy.toString("base64")}`)};b.src=${JSON.stringify(`data:image/png;base64,${ts.toString("base64")}`)};await Promise.all([a.decode(),b.decode()]);const c=document.querySelector('canvas'),x=c.getContext('2d',{willReadFrequently:true}),left=crop?.x??0,top=crop?.y??0,width=crop?.width??Math.max(a.width,b.width),height=crop?.height??Math.max(a.height,b.height),legacyY=top+(offsets?.legacyY??0),tsY=top+(offsets?.tsY??0);c.width=width;c.height=height;x.drawImage(a,left,legacyY,width,height,0,0,width,height);const l=x.getImageData(0,0,c.width,c.height);x.clearRect(0,0,c.width,c.height);x.drawImage(b,left,tsY,width,height,0,0,width,height);const r=x.getImageData(0,0,c.width,c.height),o=x.createImageData(c.width,c.height);let changed=0,sum=0;for(let i=0;i<o.data.length;i+=4){let any=false;for(let j=0;j<3;j++){const d=Math.abs(l.data[i+j]-r.data[i+j]);o.data[i+j]=d;sum+=d;any||=d!==0}o.data[i+3]=255;changed+=Number(any)}x.putImageData(o,0,0);document.body.dataset.metrics=JSON.stringify({pixelCount:c.width*c.height,changedPixels:changed,diffPixelRatio:changed/(c.width*c.height),mae:sum/(c.width*c.height*3*255),crop,offsets})</script>`);
   await page.waitForFunction(() => Boolean(document.body.dataset.metrics)); const metrics = await page.evaluate(() => JSON.parse(document.body.dataset.metrics)); await shot(page, outputPath); await page.close(); return metrics;
 }
 async function previous(output, id, files) {
   try { const value = JSON.parse(await readFile(join(output, "metadata", `${nameFor(id)}.json`), "utf8")); await Promise.all(Object.values(files).map(readFile)); return value.captureStatus === "passed" ? value : undefined; } catch { return undefined; }
 }
 function addMonitorFailures(result, monitors) { const failures = monitors.flatMap((item) => item.take()); if (failures.length) { result.status = "failed"; result.captureStatus = "failed"; result.error = [result.error, ...failures].filter(Boolean).join("\n"); } }
-function html(results, output) { const image = (result, kind) => result.files?.[kind] ? `<a href="${relative(output,result.files[kind]).split(sep).join("/")}"><img src="${relative(output,result.files[kind]).split(sep).join("/")}"></a>` : "-"; return `<!doctype html><meta charset="utf-8"><style>body{font:14px system-ui}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:6px}img{width:200px}</style><p>Review when changed pixels > ${REVIEW_DIFF_PIXEL_RATIO * 100}% or MAE > ${REVIEW_MAE * 100}%.</p><table>${results.map((r)=>`<tr><td>${r.id}</td><td>${r.status}</td><td>${r.metrics ? `${(r.metrics.diffPixelRatio*100).toFixed(2)}% / ${(r.metrics.mae*100).toFixed(3)}%` : "-"}</td><td>${image(r,"legacy")}</td><td>${image(r,"ts")}</td><td>${image(r,"diff")}</td><td>${r.error??""}</td></tr>`).join("")}</table>`; }
+async function diffRegions(context, files, legacyLayout, tsLayout) {
+  const regions = normalizedVisualRegions(legacyLayout, tsLayout), metrics = {};
+  // `crop.y` is expressed in the legacy page's physical coordinates.  Move
+  // the TypeScript source upward by the known chrome-origin delta so both
+  // crops start at their actual workspace/scope edge.
+  const offsets = { legacyY: 0, tsY: tsLayout.workspaceOrigin.y - legacyLayout.workspaceOrigin.y };
+  for (const [name, crop] of Object.entries(regions)) {
+    const path = files.diff.replace(/\.png$/, `-${name}.png`);
+    const regionOffsets = name === "top" ? undefined : offsets;
+    metrics[name] = { crop, file: path, ...(await diff(context, files.legacy, files.ts, path, crop, regionOffsets)) };
+  }
+  return metrics;
+}
+function html(results, output) { const image = (result, kind) => result.files?.[kind] ? `<a href="${relative(output,result.files[kind]).split(sep).join("/")}"><img src="${relative(output,result.files[kind]).split(sep).join("/")}"></a>` : "-"; const regions=(result)=>result.regionMetrics?Object.entries(result.regionMetrics).map(([name,value])=>`${name}: ${(value.diffPixelRatio*100).toFixed(2)}% / ${(value.mae*100).toFixed(3)}%`).join("<br>"):"-"; return `<!doctype html><meta charset="utf-8"><style>body{font:14px system-ui}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:6px;vertical-align:top}img{width:200px}</style><p>Review when changed pixels > ${REVIEW_DIFF_PIXEL_RATIO * 100}% or MAE > ${REVIEW_MAE * 100}%. Full-page metrics are diagnostic; region metrics localize chrome/workspace differences.</p><table><tr><th>Scenario</th><th>Status</th><th>Baseline</th><th>Full diff</th><th>Top / workspace / right / bottom</th><th>Legacy</th><th>TS</th><th>Diff</th><th>Error</th></tr>${results.map((r)=>`<tr><td>${r.id}</td><td>${r.status}</td><td>${r.baseline?.valid===false?"invalid-baseline":r.baseline?.valid===true?"comparable":"-"}</td><td>${r.metrics ? `${(r.metrics.diffPixelRatio*100).toFixed(2)}% / ${(r.metrics.mae*100).toFixed(3)}%` : "-"}</td><td>${regions(r)}</td><td>${image(r,"legacy")}</td><td>${image(r,"ts")}</td><td>${image(r,"diff")}</td><td>${r.error??""}</td></tr>`).join("")}</table>`; }
 
 export async function run() {
   try {
@@ -147,14 +230,14 @@ export async function run() {
     throw new Error("Visual regression requires an external legacy baseline at public/legacy/circuitjs.html. Run it from the migration checkout, not the standalone TypeScript release.");
   }
   const options = optionsFrom(process.argv.slice(2)); await prepare(options.output, options.keepOutput);
-  const all = await findCircuits(CIRCUITS), selected = (options.limit ? all.slice(0, options.limit) : all).map((file) => ({ file, id: relative(CIRCUITS, file).split(sep).join("/") }));
+  const all = await findCircuits(CIRCUITS), candidates = options.only ? all.filter((file) => options.only.has(relative(CIRCUITS, file).split(sep).join("/"))) : all, selected = (options.limit ? candidates.slice(0, options.limit) : candidates).map((file) => ({ file, id: relative(CIRCUITS, file).split(sep).join("/") }));
   if (!selected.length) throw new Error("No circuit fixtures found"); console.log(`Capturing ${selected.length}/${all.length} static circuit scenarios.`);
   const server = await createServer({ root: ROOT, logLevel: "error", plugins: [legacyPlugin()], server: { host: "127.0.0.1", port: 0 } }); await server.listen(); const address = server.httpServer.address(); if (!address || typeof address === "string") throw new Error("Vite did not expose a TCP address"); const baseUrl = `http://127.0.0.1:${address.port}/`;
   const browser = await chromium.launch({ headless: !options.headed }), context = await browser.newContext({ viewport: VIEWPORT, deviceScaleFactor: 1, serviceWorkers: "block" }), legacyPage = await context.newPage(), tsPage = await context.newPage(), legacyWatch = watch(legacyPage,"legacy"), tsWatch = watch(tsPage,"ts"); const results=[];
   try {
     const first = selected[0], firstSource = await readFile(first.file,"utf8");
-    for (const [index, entry] of MENUS.entries()) { const id=`__menu__${entry[0]}`, files=filesFor(options.output,`menu-${entry[0]}`), old=options.keepOutput && await previous(options.output,id,files); if(old){results.push(old);continue} const result={id,status:"passed",captureStatus:"passed",files,error:undefined,menu:{}}; legacyWatch.reset();tsWatch.reset();try{await legacyLoad(legacyPage,baseUrl,first.id,firstSource);result.menu.legacy=await verifyMenu(legacyPage,"legacy",entry,index);await shot(legacyPage,files.legacy);await tsLoad(tsPage,baseUrl,firstSource);result.menu.ts=await verifyMenu(tsPage,"ts",entry,index);await shot(tsPage,files.ts);if(options.diff){result.metrics=await diff(context,files.legacy,files.ts,files.diff);if(result.metrics.diffPixelRatio>REVIEW_DIFF_PIXEL_RATIO||result.metrics.mae>REVIEW_MAE)result.status="review"}}catch(error){result.status="failed";result.captureStatus="failed";result.error=errorText(error)}addMonitorFailures(result,[legacyWatch,tsWatch]);await writeFile(join(options.output,"metadata",`${nameFor(id)}.json`),JSON.stringify(result,null,2));results.push(result);}
-    for(const scenario of selected){const files=filesFor(options.output,nameFor(scenario.id)),old=options.keepOutput&&await previous(options.output,scenario.id,files);if(old){results.push(old);console.log(`[resumed] ${scenario.id}`);continue}const source=await readFile(scenario.file,"utf8"),result={id:scenario.id,status:"passed",captureStatus:"passed",files,error:undefined,source:{inputSha256:sha(source)}};legacyWatch.reset();tsWatch.reset();try{result.source.legacy=await legacyLoad(legacyPage,baseUrl,scenario.id,source);await shot(legacyPage,files.legacy);result.source.ts=await tsLoad(tsPage,baseUrl,source);await shot(tsPage,files.ts);if(options.diff){result.metrics=await diff(context,files.legacy,files.ts,files.diff);if(result.metrics.diffPixelRatio>REVIEW_DIFF_PIXEL_RATIO||result.metrics.mae>REVIEW_MAE)result.status="review"}}catch(error){result.status="failed";result.captureStatus="failed";result.error=errorText(error)}addMonitorFailures(result,[legacyWatch,tsWatch]);await writeFile(join(options.output,"metadata",`${nameFor(scenario.id)}.json`),JSON.stringify(result,null,2));results.push(result);console.log(`[${result.status}] ${scenario.id}`)}
+    for (const [index, entry] of MENUS.entries()) { const id=`__menu__${entry[0]}`, files=filesFor(options.output,`menu-${entry[0]}`), old=options.keepOutput && await previous(options.output,id,files); if(old){results.push(old);continue} const result={id,status:"passed",captureStatus:"passed",files,error:undefined,menu:{}}; legacyWatch.reset();tsWatch.reset();try{result.source={legacy:await legacyLoad(legacyPage,baseUrl,first.id,firstSource)};result.menu.legacy=await verifyMenu(legacyPage,"legacy",entry,index);await shot(legacyPage,files.legacy);result.source.ts=await tsLoad(tsPage,baseUrl,firstSource);result.menu.ts=await verifyMenu(tsPage,"ts",entry,index);await shot(tsPage,files.ts);result.baseline=comparableLayout(result.source.legacy.visualLayout,result.source.ts.visualLayout);if(!result.baseline.valid){result.status="invalid-baseline"}else if(options.diff){result.metrics=await diff(context,files.legacy,files.ts,files.diff);result.regionMetrics=await diffRegions(context,files,result.source.legacy.visualLayout,result.source.ts.visualLayout);if(result.metrics.diffPixelRatio>REVIEW_DIFF_PIXEL_RATIO||result.metrics.mae>REVIEW_MAE)result.status="review"}}catch(error){result.status="failed";result.captureStatus="failed";result.error=errorText(error)}addMonitorFailures(result,[legacyWatch,tsWatch]);await writeFile(join(options.output,"metadata",`${nameFor(id)}.json`),JSON.stringify(result,null,2));results.push(result);}
+    for(const scenario of selected){const files=filesFor(options.output,nameFor(scenario.id)),old=options.keepOutput&&await previous(options.output,scenario.id,files);if(old){results.push(old);console.log(`[resumed] ${scenario.id}`);continue}const source=await readFile(scenario.file,"utf8"),result={id:scenario.id,status:"passed",captureStatus:"passed",files,error:undefined,source:{inputSha256:sha(source)}};legacyWatch.reset();tsWatch.reset();try{result.source.legacy=await legacyLoad(legacyPage,baseUrl,scenario.id,source);await shot(legacyPage,files.legacy);result.source.ts=await tsLoad(tsPage,baseUrl,source);await shot(tsPage,files.ts);result.baseline=comparableLayout(result.source.legacy.visualLayout,result.source.ts.visualLayout);if(!result.baseline.valid){result.status="invalid-baseline"}else if(options.diff){result.metrics=await diff(context,files.legacy,files.ts,files.diff);result.regionMetrics=await diffRegions(context,files,result.source.legacy.visualLayout,result.source.ts.visualLayout);if(result.metrics.diffPixelRatio>REVIEW_DIFF_PIXEL_RATIO||result.metrics.mae>REVIEW_MAE)result.status="review"}}catch(error){result.status="failed";result.captureStatus="failed";result.error=errorText(error)}addMonitorFailures(result,[legacyWatch,tsWatch]);await writeFile(join(options.output,"metadata",`${nameFor(scenario.id)}.json`),JSON.stringify(result,null,2));results.push(result);console.log(`[${result.status}] ${scenario.id}`)}
   } finally { await context.close();await browser.close();await server.close(); }
-  const summary={passed:results.filter((r)=>r.status==="passed").length,review:results.filter((r)=>r.status==="review").length,failed:results.filter((r)=>r.status==="failed").length}; const report={generatedAt:new Date().toISOString(),viewport:VIEWPORT,thresholds:{REVIEW_DIFF_PIXEL_RATIO,REVIEW_MAE},execution:{mode:options.strict?"strict-gate":"review-collection",strict:options.strict,exitNonZeroWhen:options.strict?"review or failed":"failed only"},source:{totalScenarios:all.length,capturedScenarios:selected.length},summary,results}; await writeFile(join(options.output,"report.json"),JSON.stringify(report,null,2));await writeFile(join(options.output,"report.html"),html(results,options.output));console.log(`Report: ${join(options.output,"report.html")}`);if(summary.failed||(options.strict&&summary.review))process.exitCode=1;
+  const summary={passed:results.filter((r)=>r.status==="passed").length,review:results.filter((r)=>r.status==="review").length,invalidBaseline:results.filter((r)=>r.status==="invalid-baseline").length,failed:results.filter((r)=>r.status==="failed").length}; const report={generatedAt:new Date().toISOString(),viewport:VIEWPORT,thresholds:{REVIEW_DIFF_PIXEL_RATIO,REVIEW_MAE},execution:{mode:options.strict?"strict-gate":"review-collection",strict:options.strict,exitNonZeroWhen:options.strict?"review, invalid-baseline, or failed":"invalid-baseline or failed"},source:{totalScenarios:all.length,capturedScenarios:selected.length},summary,results}; await writeFile(join(options.output,"report.json"),JSON.stringify(report,null,2));await writeFile(join(options.output,"report.html"),html(results,options.output));console.log(`Report: ${join(options.output,"report.html")}`);if(summary.failed||summary.invalidBaseline||(options.strict&&summary.review))process.exitCode=1;
 }

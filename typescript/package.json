@@ -20,6 +20,8 @@
     "visual:regression": "node visual-regression/run.mjs",
     "visual:smoke": "node visual-regression/run.mjs --limit=1",
     "visual:gate": "node visual-regression/run.mjs --strict",
+    "visual:dynamic": "node visual-regression/dynamic-runner.mjs",
+    "visual:dynamic:gate": "node visual-regression/dynamic-runner.mjs --strict",
     "desktop:install": "npm install --prefix desktop",
     "desktop:dev": "npm run dev --prefix desktop",
     "desktop:build": "npm run build --prefix desktop"

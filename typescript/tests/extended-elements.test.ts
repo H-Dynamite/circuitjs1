@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import {
   CircuitElm,
   CircuitLoader,
+  CircuitRunner,
   CustomTransformerElm,
   DataInputElm,
   ElementFactory,
@@ -11,6 +14,24 @@ import {
 } from "../src/core";
 
 describe("extended native element ports", () => {
+  it("keeps XML composite, adjustable, and scope records out of top-level element counts", async () => {
+    const fixtures = [
+      ["adder4-sc.txt", 110],
+      ["conv-buck.txt", 15],
+      ["plot2d-smile.txt", 35]
+    ] as const;
+
+    for (const [name, expectedElements] of fixtures) {
+      const source = await readFile(
+        resolve(process.cwd(), "src", "examples", "circuits", name),
+        "utf8"
+      );
+      const runner = CircuitRunner.fromXml(source);
+      expect(runner.elements).toHaveLength(expectedElements);
+      runner.analyzeCircuit();
+    }
+  });
+
   it("loads stateful XML elements without a legacy runtime", () => {
     CircuitElm.initClass(new SimulationManager());
     const source = [

@@ -1,4 +1,4 @@
-import { access, readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { CircuitRunner } from "../src/core";
 import { expect, it } from "vitest";
@@ -13,29 +13,36 @@ async function findCircuitFiles(directory: string): Promise<string[]> {
   return result;
 }
 
-async function resolveCircuitDirectory(): Promise<string> {
-  const legacyDirectory = resolve(
-    process.cwd(),
-    "..",
-    "src",
-    "com",
-    "lushprojects",
-    "circuitjs1",
-    "public",
-    "circuits"
-  );
+async function directoryExists(directory: string): Promise<boolean> {
   try {
-    await access(legacyDirectory);
-    return legacyDirectory;
+    return (await stat(directory)).isDirectory();
   } catch {
-    return resolve(process.cwd(), "src", "examples", "circuits");
+    return false;
   }
 }
 
 it(
   "constructs and analyzes every structurally supported original example",
   async () => {
-    const circuitDirectory = await resolveCircuitDirectory();
+    const originalCircuitDirectory = resolve(
+      process.cwd(),
+      "..",
+      "src",
+      "com",
+      "lushprojects",
+      "circuitjs1",
+      "public",
+      "circuits"
+    );
+    const bundledCircuitDirectory = resolve(
+      process.cwd(),
+      "src",
+      "examples",
+      "circuits"
+    );
+    const circuitDirectory = (await directoryExists(originalCircuitDirectory))
+      ? originalCircuitDirectory
+      : bundledCircuitDirectory;
     const files = await findCircuitFiles(circuitDirectory);
     const constructionFailures: string[] = [];
     const analysisFailures: string[] = [];
