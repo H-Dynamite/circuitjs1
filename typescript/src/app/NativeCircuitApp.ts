@@ -2779,19 +2779,14 @@ export class NativeCircuitApp {
 
   private updateRunButtonAppearance(): void {
     if (!this.runButton) return;
-    const icon =
-      localStorage.getItem("circuitjs1-ts-mod-run-icon") ?? "text";
-    if (icon === "text") {
-      this.runButton.textContent = this.running ? "暂停" : "运行";
-      this.runButton.title = this.running ? "暂停仿真" : "继续仿真";
-      return;
-    }
-    if (!this.running) {
-      this.runButton.textContent = icon === "stop" ? "运行" : "▶";
-    } else {
-      this.runButton.textContent = icon === "stop" ? "■" : "Ⅱ";
-    }
+    // Keep the native simulator state, but render the same two-state control
+    // that UIManager.setSimRunning() exposes in the GWT baseline.
+    this.runButton.innerHTML = this.running
+      ? "<strong>RUN</strong>&nbsp;/&nbsp;Stop"
+      : "Run&nbsp;/&nbsp;<strong>STOP</strong>";
     this.runButton.title = this.running ? "暂停仿真" : "继续仿真";
+    this.runButton.classList.toggle("topButton-red", !this.running);
+    this.runButton.classList.toggle("topButton", this.running);
   }
 
   private toggleSidebar(): void {
@@ -4660,8 +4655,8 @@ export class NativeCircuitApp {
     if (modeLabel !== null) {
       modeLabel.textContent =
         tool === "select"
-          ? "拖动鼠标"
-          : `添加 ${COMPONENT_BY_ID.get(tool)?.label ?? tool}`;
+          ? "模式：选择"
+          : `模式：${COMPONENT_BY_ID.get(tool)?.label ?? tool}`;
     }
   }
 
@@ -4857,6 +4852,25 @@ export class NativeCircuitApp {
   }
 
   private static toolbarIcon(name: string): string {
+    // These glyphs are the exact Fontello glyphs used by legacy Toolbar.java.
+    // The font is bundled with the native TypeScript app from src/assets.
+    // using it avoids a visually-similar but different hand-drawn replacement.
+    const legacyFontello: Record<string, string> = {
+      undo: "ccw",
+      redo: "cw",
+      cut: "scissors",
+      copy: "copy",
+      paste: "paste",
+      duplicate: "clone",
+      search: "search",
+      zoom100: "zoom-11",
+      zoomIn: "zoom-in",
+      zoomOut: "zoom-out"
+    };
+    const fontelloIcon = legacyFontello[name];
+    if (fontelloIcon !== undefined) {
+      return `<span class="legacy-toolbar-icon cirjsicon-${fontelloIcon}" aria-hidden="true"></span>`;
+    }
     const icons: Record<string, string> = {
       undo: '<path d="M9 6H4v-5M4 6l5-5"/><path d="M4 6h9a7 7 0 1 1-6.2 10.2"/>',
       redo: '<path d="M15 6h5v-5m0 5-5-5"/><path d="M20 6h-9a7 7 0 1 0 6.2 10.2"/>',
@@ -4972,7 +4986,7 @@ export class NativeCircuitApp {
         ["nor-gate", "或非门", "nor"],
         ["xor-gate", "异或门", "xor"]
       ]),
-      '<span id="tool-mode-label" class="tool-mode-label">拖动鼠标</span>'
+      '<span id="tool-mode-label" class="tool-mode-label">模式：选择</span>'
     ].join("");
   }
 
@@ -5083,8 +5097,8 @@ export class NativeCircuitApp {
 
           <aside class="control-panel">
             <div class="run-row">
-              <button data-action="reset">重置</button>
-              <button id="run-toggle" data-action="run" class="active">暂停</button>
+              <button data-action="reset" class="topButton">Reset</button>
+              <button id="run-toggle" data-action="run" class="topButton"><strong>RUN</strong>&nbsp;/&nbsp;Stop</button>
             </div>
             <label>仿真速度
               <input data-control="simulation-speed" type="range" min="0" max="84" value="55">

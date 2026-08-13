@@ -31,7 +31,9 @@ button {
 .native-app {
   position: relative;
   display: grid;
-  grid-template-rows: 28px minmax(0, 1fr);
+  /* Match UIManager.MENUBARHEIGHT exactly.  The toolbar below owns the
+   * remaining 40px of the chrome so the workspace always begins at y=70. */
+  grid-template-rows: 30px minmax(0, 1fr);
   width: 100%;
   height: 100%;
   background: #ececec;
@@ -41,10 +43,10 @@ button {
   z-index: 20;
   display: flex;
   align-items: stretch;
-  gap: 1px;
+  gap: 0;
   padding: 0;
-  border-bottom: 1px solid #c7cbd1;
-  background: #e5eaf2;
+  border-bottom: 1px solid #ccc;
+  background: #f8f8f8;
   font-size: 13px;
   font-weight: 600;
   user-select: none;
@@ -58,7 +60,7 @@ button {
 .menu-direct {
   display: grid;
   place-items: center;
-  height: 28px;
+  height: 30px;
   padding: 0 8px;
   border: 0;
   background: transparent;
@@ -73,12 +75,14 @@ button {
 .menu-bar summary:hover,
 .menu-bar details[open] summary,
 .menu-direct:hover {
-  background: #d4dbe7;
+  background: #e6f7ff;
 }
 
 .menu-popup {
   position: absolute;
-  top: 28px;
+  /* details' popup static position already follows its summary.  Keeping
+   * this at zero prevents the menu height from being applied twice. */
+  top: 0;
   left: 0;
   min-width: 150px;
   padding: 4px;
@@ -323,15 +327,16 @@ button {
   z-index: 10;
   display: flex;
   align-items: center;
-  gap: 1px;
+  gap: 0;
   min-width: 0;
-  padding: 2px 5px;
-  border-bottom: 1px solid #b9bec6;
-  background: #fafafa;
-  box-shadow: 0 1px 2px rgb(0 0 0 / 8%);
+  height: 40px;
+  min-height: 40px;
+  padding: 2px;
+  border-bottom: 1px solid #ccc;
+  background: #f8f8f8;
+  box-shadow: none;
   color: #333;
   overflow: visible;
-  min-height: 42px;
   box-sizing: border-box;
 }
 
@@ -343,12 +348,12 @@ button {
   flex: 0 0 auto;
   display: grid;
   place-items: center;
-  width: 29px;
-  height: 34px;
-  margin: 0 1px;
-  padding: 3px;
-  border: 1px solid transparent;
-  border-radius: 2px;
+  width: 26px;
+  height: 26px;
+  margin: 0 5px 0 0;
+  padding: 1px;
+  border: 0;
+  border-radius: 0;
   background: transparent;
   line-height: 1;
   cursor: pointer;
@@ -365,6 +370,42 @@ button {
   stroke-linejoin: round;
 }
 
+/* Exact legacy Fontello face and glyphs for Toolbar.java's first ten tools. */
+@font-face {
+  font-family: "CircuitJS1LegacyFontello";
+  src: url("./assets/fontello.woff2") format("woff2");
+  font-style: normal;
+  font-weight: normal;
+  font-display: block;
+}
+
+.legacy-toolbar-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  color: currentcolor;
+  font-family: "CircuitJS1LegacyFontello";
+  font-size: 24px;
+  font-style: normal;
+  font-weight: normal;
+  line-height: 1;
+  speak: never;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.cirjsicon-ccw::before { content: "\e802"; }
+.cirjsicon-cw::before { content: "\e805"; }
+.cirjsicon-scissors::before { content: "\e806"; }
+.cirjsicon-copy::before { content: "\f0c5"; }
+.cirjsicon-paste::before { content: "\f0ea"; }
+.cirjsicon-clone::before { content: "\f24d"; }
+.cirjsicon-search::before { content: "\e814"; }
+.cirjsicon-zoom-11::before { content: "\e807"; }
+.cirjsicon-zoom-in::before { content: "\e80a"; }
+.cirjsicon-zoom-out::before { content: "\e80b"; }
+
 .tool-button svg .fill {
   fill: currentcolor;
   stroke: none;
@@ -377,15 +418,14 @@ button {
 }
 
 .tool-button:hover {
-  color: #087ccd;
-  background: #eef6fc;
+  color: #333;
+  background: #e6f7ff;
 }
 
 .tool-button.active,
 .tool-button:active {
-  color: #0569ad;
-  border-color: #4c91d9;
-  background: #dbeafe;
+  color: #007bff;
+  background: #e6f7ff;
 }
 
 .tool-variant {
@@ -430,9 +470,9 @@ button {
 .tool-mode-label {
   flex: 0 0 auto;
   margin-left: 5px;
-  padding: 0 8px;
-  color: #444;
-  font-size: 13px;
+  padding-right: 10px;
+  color: #333;
+  font-size: 16px;
   white-space: nowrap;
 }
 
@@ -506,7 +546,7 @@ button {
 }
 
 .compact-menu .menu-popup {
-  top: 20px;
+  top: 0;
 }
 
 .compact-menu .sidebar-toggle {
@@ -606,17 +646,22 @@ button {
 }
 
 .run-row button {
-  padding: 5px 4px;
-  border: 1px solid #aeb4bc;
-  border-radius: 3px;
-  background: linear-gradient(#fff, #e8e8e8);
+  min-height: 26px;
+  padding: 3px 5px;
+  border: 1px solid #aaa;
+  border-radius: 0;
+  background: #f8f8f8;
   cursor: pointer;
 }
 
-.run-row button.active {
-  border-color: #31945f;
-  color: #0c6739;
-  background: #dff7e9;
+.run-row button.topButton {
+  color: #222;
+}
+
+.run-row button.topButton-red {
+  border-color: #b33;
+  color: #a00;
+  background: #fff0f0;
 }
 
 .control-panel label {

@@ -16,6 +16,7 @@
     "preview": "vite preview",
     "test": "vitest run",
     "check": "npm run test && npm run build",
+    "test:top-chrome": "node visual-regression/top-chrome-browser-test.mjs",
     "visual:install-browser": "playwright install chromium",
     "visual:regression": "node visual-regression/run.mjs",
     "visual:smoke": "node visual-regression/run.mjs --limit=1",
