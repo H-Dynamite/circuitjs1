@@ -20,6 +20,9 @@ async function snapshot(page, testCase) {
   await page.evaluate((classes) => {
     const app = document.querySelector(".native-app");
     const toolbar = document.querySelector(".tool-bar");
+    // Test each responsive geometry as a settled layout; do not sample the
+    // optional sidebar animation between two viewport configurations.
+    app?.style.setProperty("--sidebar-duration", "0ms");
     app?.classList.remove("compact-menu");
     toolbar?.classList.remove("hidden");
     app?.classList.add(...classes.filter((name) => name !== "toolbar-hidden"));
@@ -50,6 +53,15 @@ async function snapshot(page, testCase) {
       toolbar: rect(".tool-bar"),
       tool: rect(".tool-bar .tool-button"),
       firstIcon: rect(".tool-bar .tool-button > :first-child"),
+      fontTools: Array.from(document.querySelectorAll(".tool-bar .tool-button:has(.legacy-toolbar-icon)"), (element) => {
+        const rect = element.getBoundingClientRect();
+        return { x: rect.x, width: rect.width, marginRight: getComputedStyle(element).marginRight };
+      }),
+      fontIcons: Array.from(document.querySelectorAll(".tool-bar .legacy-toolbar-icon"), (element) => {
+        const rect = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return { x: rect.x, y: rect.y, width: rect.width, height: rect.height, transform: style.transform };
+      }),
       canvas: rect("#circuit-canvas"),
       layout
     };
@@ -71,7 +83,7 @@ function assertCase(testCase, value) {
   assert.equal(value.summary.fontSize, "13px", `${testCase.id} menu font size`);
   assert.equal(value.summary.fontWeight, "600", `${testCase.id} menu font weight`);
   if (testCase.toolbar > 0) {
-    assert.equal(value.tool.width, 26, `${testCase.id} tool outer width`);
+    approximately(value.tool.width, 35.59375, `${testCase.id} first Fontello tool outer width`);
     assert.equal(value.tool.height, 26, `${testCase.id} tool outer height`);
   }
   assert.equal(value.tool.padding, "1px", `${testCase.id} tool padding`);
@@ -81,6 +93,21 @@ function assertCase(testCase, value) {
   if (testCase.toolbar > 0) {
     assert.equal(value.firstIcon.width, 24, `${testCase.id} icon width`);
     assert.equal(value.firstIcon.height, 24, `${testCase.id} icon height`);
+    const expectedFontelloX = Array.from({ length: 10 }, (_, index) => 3 + index * 40.59375);
+    assert.equal(value.fontTools.length, 10, `${testCase.id} exactly ten Fontello toolbar tools`);
+    assert.equal(value.fontIcons.length, 10, `${testCase.id} exactly ten Fontello glyphs`);
+    value.fontTools.forEach((tool, index) => {
+      approximately(tool.x, expectedFontelloX[index], `${testCase.id} Fontello tool ${index + 1} x`);
+      approximately(tool.width, 35.59375, `${testCase.id} Fontello tool ${index + 1} width`);
+      assert.equal(tool.marginRight, "5px", `${testCase.id} Fontello tool ${index + 1} margin`);
+    });
+    value.fontIcons.forEach((icon, index) => {
+      assert.equal(icon.transform, "matrix(1, 0, 0, 1, 0, 2)", `${testCase.id} Fontello glyph ${index + 1} 2px baseline transform`);
+      approximately(icon.y, value.tool.y + 3, `${testCase.id} Fontello glyph ${index + 1} rendered baseline`);
+    });
+  }
+  if (testCase.id === "normal") {
+    approximately(value.layout.sidebarX, 1106, "normal sidebar x");
   }
   if (testCase.toolbar === 0) {
     assert.equal(value.toolbar.display, "none", `${testCase.id} toolbar hidden`);
@@ -120,6 +147,17 @@ try {
     "toolbar glyph is bound to the native Fontello face"
   );
   for (const testCase of CASES) assertCase(testCase, await snapshot(page, testCase));
+
+  // The regression baseline's 665px workspace is the real 3-cgand circuit
+  // state (including its restored scopes), rather than a manufactured canvas
+  // size.  Load it through the public app bridge before checking that layout.
+  const baselineCircuit = await (await fetch(new URL("src/examples/circuits/3-cgand.txt", `http://127.0.0.1:${address.port}/`))).text();
+  await page.evaluate((source) => window.CircuitJS1TS.loadCircuit(source), baselineCircuit);
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  const baselineLayout = await snapshot(page, CASES[0]);
+  approximately(baselineLayout.layout.sidebarX, 1106, "3-cgand normal sidebar x");
+  approximately(baselineLayout.canvas.height, 665, "3-cgand normal canvas height");
+  approximately(baselineLayout.layout.scopeY, 735, "3-cgand normal scope y");
 
   await page.setViewportSize(CASES[0].viewport);
   await page.evaluate(() => {

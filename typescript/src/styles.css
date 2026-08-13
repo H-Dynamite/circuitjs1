@@ -331,7 +331,11 @@ button {
   min-width: 0;
   height: 40px;
   min-height: 40px;
-  padding: 2px;
+  /* Toolbar.java has a 1px outer border plus 2px internal padding.  The
+   * native toolbar only needs its bottom border, so its left inset is 3px to
+   * put the first Fontello ink at the same x coordinate without moving the
+   * 40px-tall application chrome. */
+  padding: 2px 2px 2px 3px;
   border-bottom: 1px solid #ccc;
   background: #f8f8f8;
   box-shadow: none;
@@ -393,6 +397,20 @@ button {
   speak: never;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  /* fontello.css gives every glyph a 1em box and .2em side bearings.  Those
+   * bearings are part of the old toolbar's 40px rhythm, not decorative
+   * whitespace: first ten tools use a 35px label plus 5px right margin. */
+  margin: 0 4.8px;
+  /* A GWT Label is vertically centered in the 40px strip at y=32.5.  The
+   * button grid otherwise centers this 24px glyph two pixels too high. */
+  transform: translateY(2px);
+}
+
+.tool-button:has(.legacy-toolbar-icon) {
+  /* Legacy's computed label width is 35.59375px: 24px glyph box, 9.6px
+   * Fontello bearings and 2px label padding.  Keeping the fractional width
+   * preserves its 40.59375px (including 5px margin) button rhythm. */
+  width: 35.59375px;
 }
 
 .cirjsicon-ccw::before { content: "\e802"; }
