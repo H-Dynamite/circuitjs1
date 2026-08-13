@@ -1,0 +1,14 @@
+{
+  "name": "circuitjs1-tauri-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Tauri desktop wrapper for the CircuitJS1 TypeScript migration",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.11.4"
+  }
+}

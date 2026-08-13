@@ -1,0 +1,44 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "CircuitJS1",
+  "version": "0.1.0",
+  "identifier": "com.lushprojects.circuitjs1.desktop",
+  "build": {
+    "frontendDist": "../../dist",
+    "devUrl": "http://127.0.0.1:5173",
+    "beforeDevCommand": "npm run dev --prefix .. -- --host 127.0.0.1 --port 5173 --strictPort",
+    "beforeBuildCommand": "npm run build --prefix .."
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "CircuitJS1",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 960,
+        "minHeight": 640,
+        "center": true,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "nsis"
+    ],
+    "shortDescription": "CircuitJS1 circuit simulator desktop application",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}
