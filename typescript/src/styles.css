@@ -331,6 +331,8 @@ button {
   box-shadow: 0 1px 2px rgb(0 0 0 / 8%);
   color: #333;
   overflow: visible;
+  min-height: 42px;
+  box-sizing: border-box;
 }
 
 .tool-bar.hidden {
@@ -531,9 +533,20 @@ button {
 
 .canvas-column {
   display: grid;
-  grid-template-rows: minmax(220px, 1fr) 168px;
+  grid-template-rows: minmax(220px, min(665px, 100%));
+  align-content: start;
   min-width: 0;
   min-height: 0;
+  background: #fff;
+}
+
+/*
+ * CircuitJS only reserves a bottom panel when the loaded circuit owns one or
+ * more scopes.  Keeping this state on the product layout (rather than in the
+ * visual-regression harness) makes an empty circuit use its complete canvas.
+ */
+.canvas-column.has-scopes {
+  grid-template-rows: minmax(220px, 1fr) 168px;
   background: #050505;
 }
 
@@ -554,6 +567,10 @@ button {
 .scope-canvas {
   border-top: 1px solid #393939;
   background: #101010;
+}
+
+.scope-canvas[hidden] {
+  display: none;
 }
 
 .native-status {
@@ -1154,6 +1171,10 @@ dialog::backdrop {
   }
 
   .canvas-column {
+    grid-template-rows: minmax(200px, min(665px, 100%));
+  }
+
+  .canvas-column.has-scopes {
     grid-template-rows: minmax(200px, 1fr) 130px;
   }
 

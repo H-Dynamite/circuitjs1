@@ -664,7 +664,9 @@ export class NativeCircuitApp {
       workspaceOrigin: { x: box.left, y: box.top },
       workspace: { width: box.width, height: box.height },
       sidebarX: sidebar?.left ?? box.right,
-      scopeY: scope.top,
+      // A hidden scope has no visual boundary.  Report the bottom of the
+      // workspace so callers crop no fictitious bottom panel.
+      scopeY: this.hasScopes() ? scope.top : box.bottom,
       toolbarVisible: toolbar !== null && !toolbar.classList.contains("hidden")
     };
   }
@@ -1823,6 +1825,7 @@ export class NativeCircuitApp {
     };
     this.scopeGroups.push({ scopeId: this.nextScopeId(), panel, plots: [plot] });
     this.syncScopePlots();
+    this.syncScopeLayout();
     this.syncOptionButtons();
   }
 
@@ -2091,6 +2094,19 @@ export class NativeCircuitApp {
 
   private scopeCount(): number {
     return this.scopeGroups.length;
+  }
+
+  private hasScopes(): boolean {
+    return this.scopeGroups.length > 0;
+  }
+
+  /** Keep the bottom canvas in the DOM while removing it from layout if empty. */
+  private syncScopeLayout(): void {
+    const hasScopes = this.hasScopes();
+    const column = this.root.querySelector<HTMLElement>(".canvas-column");
+    column?.classList.toggle("has-scopes", hasScopes);
+    this.scopeCanvas.hidden = !hasScopes;
+    this.scopeCanvas.setAttribute("aria-hidden", String(!hasScopes));
   }
 
   private nextScopeId(): number {
@@ -3766,62 +3782,16 @@ export class NativeCircuitApp {
         plot.scopeId,
         { scopeId: plot.scopeId, panel: plot.panel, plots: plots.filter((_, index) => scopedPlots[index]?.scopeId === plot.scopeId) }
       ])).values()];
+      this.syncScopeLayout();
       this.syncOptionButtons();
       return;
     }
-    const capacitor = this.runner.elements.find(
-      (element): element is CapacitorElm =>
-        element instanceof CapacitorElm
-    );
-    const inductor = this.runner.elements.find(
-      (element): element is InductorElm =>
-        element instanceof InductorElm
-    );
-    const resistor = this.runner.elements.find(
-      (element): element is ResistorElm =>
-        element instanceof ResistorElm
-    );
-    const channels: ScopeChannel[] = [];
-    if (capacitor !== undefined) {
-      channels.push({
-        elementIndex: this.runner.elements.indexOf(capacitor),
-        value: 0,
-        name: "电容电压",
-        elementLabel: "电容器",
-        unit: "V",
-        color: "#f1e900",
-        scale: null,
-        samples: [],
-        read: () => capacitor.getVoltageDiff()
-      });
-    }
-    if (inductor !== undefined) {
-      channels.push({
-        elementIndex: this.runner.elements.indexOf(inductor),
-        value: 3,
-        name: "电感电流",
-        elementLabel: "电感器",
-        unit: "A",
-        color: "#00d83b",
-        scale: null,
-        samples: [],
-        read: () => inductor.getCurrent()
-      });
-    }
-    if (resistor !== undefined) {
-      channels.push({
-        elementIndex: this.runner.elements.indexOf(resistor),
-        value: 0,
-        name: "电阻电压",
-        elementLabel: "电阻器",
-        unit: "V",
-        color: "#20a7ff",
-        scale: null,
-        samples: [],
-        read: () => resistor.getVoltageDiff()
-      });
-    }
-    this.scopeGroups = channels.map((plot, index) => ({ scopeId: index, panel: index, plots: [plot] }));
+    // Legacy keeps the scope area empty unless the circuit has explicit `o`
+    // records or the user adds an element to a scope.  Do not manufacture
+    // charts from passive elements: that changes both the visible layout and
+    // the serialized circuit state after an otherwise no-op import.
+    this.scopeGroups = [];
+    this.syncScopeLayout();
     this.syncOptionButtons();
   }
 
@@ -3868,8 +3838,7 @@ export class NativeCircuitApp {
   private render(currentAnimationElapsedMs = 0): void {
     this.resizeCanvases();
     const context = this.canvas.getContext("2d");
-    const scopeContext = this.scopeCanvas.getContext("2d");
-    if (context === null || scopeContext === null) {
+    if (context === null) {
       throw new Error("Canvas 2D context is unavailable");
     }
     const width = this.canvas.clientWidth;
@@ -3886,19 +3855,25 @@ export class NativeCircuitApp {
       this.draft,
       this.selectionBox
     );
-    scopeContext.setTransform(
-      devicePixelRatio,
-      0,
-      0,
-      devicePixelRatio,
-      0,
-      0
-    );
-    this.renderScopes(
-      scopeContext,
-      this.scopeCanvas.clientWidth,
-      this.scopeCanvas.clientHeight
-    );
+    if (this.hasScopes()) {
+      const scopeContext = this.scopeCanvas.getContext("2d");
+      if (scopeContext === null) {
+        throw new Error("Scope Canvas 2D context is unavailable");
+      }
+      scopeContext.setTransform(
+        devicePixelRatio,
+        0,
+        0,
+        devicePixelRatio,
+        0,
+        0
+      );
+      this.renderScopes(
+        scopeContext,
+        this.scopeCanvas.clientWidth,
+        this.scopeCanvas.clientHeight
+      );
+    }
     this.updateStatus();
   }
 
@@ -4650,7 +4625,10 @@ export class NativeCircuitApp {
   }
 
   private resizeCanvases(): void {
-    for (const canvas of [this.canvas, this.scopeCanvas]) {
+    const canvases = this.hasScopes()
+      ? [this.canvas, this.scopeCanvas]
+      : [this.canvas];
+    for (const canvas of canvases) {
       const width = Math.max(1, Math.floor(canvas.clientWidth));
       const height = Math.max(1, Math.floor(canvas.clientHeight));
       const pixelWidth = Math.floor(width * devicePixelRatio);

@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NativeCircuitApp } from "../src/app/NativeCircuitApp";
 import { CircuitRunner, CustomCompositeElm, VoltageElm } from "../src/core";
@@ -317,6 +318,71 @@ describe("options menu functionality", () => {
     reloaded.api.loadCircuit(app.api.exportCircuit());
     expect(reloaded.api.getDynamicSnapshot().scopeCount).toBe(2);
     expect(reloaded.api.getDynamicSnapshot().scopes.map((scope) => scope.panel)).toEqual([0, 1]);
+  });
+
+  it("does not reserve a bottom scope panel until the circuit owns a scope", () => {
+    const root = document.querySelector<HTMLElement>("#app");
+    expect(root).not.toBeNull();
+    const app = new NativeCircuitApp(root!);
+    app.api.loadCircuit("$ 1 0.000005 10.2 50 5 43 5e-11");
+    const scopeCanvas = root!.querySelector<HTMLCanvasElement>("#scope-canvas");
+    const canvasColumn = root!.querySelector<HTMLElement>(".canvas-column");
+    expect(scopeCanvas?.hidden).toBe(true);
+    expect(scopeCanvas?.getAttribute("aria-hidden")).toBe("true");
+    expect(canvasColumn?.classList.contains("has-scopes")).toBe(false);
+
+    app.api.loadCircuit(
+      [
+        "$ 1 0.000005 10.2 50 5 43 5e-11",
+        "r 0 0 32 0 0 10",
+        "o 0 64 0 0 20 0 0"
+      ].join("\n")
+    );
+    expect(scopeCanvas?.hidden).toBe(false);
+    expect(scopeCanvas?.getAttribute("aria-hidden")).toBe("false");
+    expect(canvasColumn?.classList.contains("has-scopes")).toBe(true);
+
+    app.api.loadCircuit("$ 1 0.000005 10.2 50 5 43 5e-11");
+    expect(app.api.getDynamicSnapshot().scopeCount).toBe(0);
+    expect(scopeCanvas?.hidden).toBe(true);
+    expect(canvasColumn?.classList.contains("has-scopes")).toBe(false);
+  });
+
+  it("restores the scope layout when the user chooses to view a selected element in the scope", () => {
+    const root = document.querySelector<HTMLElement>("#app");
+    expect(root).not.toBeNull();
+    const app = new NativeCircuitApp(root!);
+    app.api.loadCircuit(
+      [
+        "$ 1 0.000005 10.2 50 5 43 5e-11",
+        "r 0 0 32 0 0 10"
+      ].join("\n")
+    );
+    const state = app as unknown as {
+      selectedIndex: number | null;
+      selectedIndices: Set<number>;
+    };
+    state.selectedIndex = 0;
+    state.selectedIndices.add(0);
+    const scopeCanvas = root!.querySelector<HTMLCanvasElement>("#scope-canvas");
+    const canvasColumn = root!.querySelector<HTMLElement>(".canvas-column");
+    expect(scopeCanvas?.hidden).toBe(true);
+    root!
+      .querySelector<HTMLButtonElement>('[data-action="scope-selected"]')
+      ?.click();
+    expect(app.api.getDynamicSnapshot().scopeCount).toBe(1);
+    expect(scopeCanvas?.hidden).toBe(false);
+    expect(canvasColumn?.classList.contains("has-scopes")).toBe(true);
+  });
+
+  it("keeps the narrow layout single-row until a scope is present", () => {
+    const styles = readFileSync("src/styles.css", "utf8");
+    expect(styles).toMatch(
+      /@media \(max-width: 760px\)[\s\S]*?\.canvas-column \{\s*grid-template-rows: minmax\(200px, min\(665px, 100%\)\);/u
+    );
+    expect(styles).toMatch(
+      /@media \(max-width: 760px\)[\s\S]*?\.canvas-column\.has-scopes \{\s*grid-template-rows: minmax\(200px, 1fr\) 130px;/u
+    );
   });
 
   it("keeps a voltage/current pair together when separating a combined scope", () => {
