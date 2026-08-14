@@ -45,8 +45,13 @@ button {
   align-items: stretch;
   gap: 0;
   padding: 0;
-  border-bottom: 1px solid #ccc;
-  background: #f8f8f8;
+  /* GWT clean.css draws the horizontal menu as a 1px #e0e0e0 frame over
+   * hborder.png's blue-grey-to-near-white strip.  Keep this separate from
+   * the toolbar below: the menu owns its y=29 edge and still occupies the
+   * same 30px grid track. */
+  border: 1px solid #e0e0e0;
+  background: linear-gradient(to bottom, #fff 0%, #e3e8f3 85%, #e3e8f3 100%);
+  font-family: "Arial Unicode MS", Arial, sans-serif;
   font-size: 13px;
   font-weight: 600;
   user-select: none;
@@ -58,14 +63,27 @@ button {
 
 .menu-bar summary,
 .menu-direct {
-  display: grid;
-  place-items: center;
-  height: 30px;
-  padding: 0 8px;
+  display: block;
+  height: 28px;
+  padding: 5px 10px;
   border: 0;
   background: transparent;
   cursor: default;
   list-style: none;
+}
+
+/* The GWT MenuBar is a table, so its fractional text-cell widths leave the
+ * first three Chinese labels two pixels to the right of an ordinary flex
+ * flow, then converge by the final item.  Preserve the same total menu
+ * width while matching that legacy cell rhythm: +2 on the first cell and
+ * one pixel reclaimed on the third and sixth cells. */
+.menu-bar > details:nth-child(1) > summary {
+  padding-left: 12px;
+}
+
+.menu-bar > details:nth-child(3) > summary,
+.menu-bar > details:nth-child(6) > summary {
+  padding-right: 9px;
 }
 
 .menu-bar summary::-webkit-details-marker {
@@ -82,7 +100,7 @@ button {
   position: absolute;
   /* details' popup static position already follows its summary.  Keeping
    * this at zero prevents the menu height from being applied twice. */
-  top: 0;
+  top: 1px;
   left: 0;
   min-width: 150px;
   padding: 4px;
@@ -560,11 +578,13 @@ button {
 
 .compact-menu .menu-bar summary,
 .compact-menu .menu-direct {
-  height: 20px;
+  height: 18px;
+  padding-top: 2px;
+  padding-bottom: 2px;
 }
 
 .compact-menu .menu-popup {
-  top: 0;
+  top: 1px;
 }
 
 .compact-menu .sidebar-toggle {
@@ -1239,11 +1259,6 @@ dialog::backdrop {
 
   .canvas-column.has-scopes {
     grid-template-rows: minmax(200px, 1fr) 130px;
-  }
-
-  .menu-bar summary,
-  .menu-direct {
-    padding: 0 6px;
   }
 
   .component-menu,

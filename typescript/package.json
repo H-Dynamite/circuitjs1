@@ -21,6 +21,7 @@
     "visual:regression": "node visual-regression/run.mjs",
     "visual:smoke": "node visual-regression/run.mjs --limit=1",
     "visual:gate": "node visual-regression/run.mjs --strict",
+    "visual:menu-strip:gate": "node visual-regression/run.mjs --only=3-cgand.txt --menu-strip-gate",
     "visual:dynamic": "node visual-regression/dynamic-runner.mjs",
     "visual:dynamic:gate": "node visual-regression/dynamic-runner.mjs --strict",
     "desktop:install": "npm install --prefix desktop",

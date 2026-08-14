@@ -7,6 +7,8 @@ import { createServer } from "vite";
 const ROOT = process.cwd(), DEFAULT_OUTPUT = resolve(ROOT, "visual-regression", "artifacts");
 const CIRCUITS = resolve(ROOT, "src", "examples", "circuits"), VIEWPORT = { width: 1280, height: 900 };
 const REVIEW_DIFF_PIXEL_RATIO = 0.01, REVIEW_MAE = 0.002;
+const MENU_STRIP_GATE_ID = "3-cgand.txt", MENU_STRIP_MAE = 0.03;
+const MENU_CAPTURE_TIMEOUT_MS = 60_000;
 const MENUS = [
   ["file", "\u6587\u4ef6", "\u6587\u4ef6", "new"], ["edit", "\u7f16\u8f91", "\u7f16\u8f91", "undo"],
   ["draw", "\u7ed8\u5236", "\u7ed8\u5236", "tool"], ["scopes", "\u793a\u6ce2\u5668", "\u793a\u6ce2\u5668", "scope-reset"],
@@ -19,13 +21,14 @@ const errorText = (error) => error instanceof Error ? error.message : String(err
 const filesFor = (output, stem) => ({ legacy: join(output, "legacy", `${stem}.png`), ts: join(output, "ts", `${stem}.png`), diff: join(output, "diff", `${stem}.png`) });
 
 function optionsFrom(args) {
-  const result = { output: DEFAULT_OUTPUT, limit: undefined, only: undefined, keepOutput: false, diff: true, headed: false, strict: false };
+  const result = { output: DEFAULT_OUTPUT, limit: undefined, only: undefined, keepOutput: false, diff: true, headed: false, strict: false, menuStripGate: false };
   for (const arg of args) {
-    if (arg === "--help") { console.log("Options: --limit=N --only=id[,id] --output=PATH --headed --no-diff --keep-output"); process.exit(0); }
+    if (arg === "--help") { console.log("Options: --limit=N --only=id[,id] --output=PATH --headed --no-diff --keep-output --menu-strip-gate"); process.exit(0); }
     if (arg === "--keep-output") result.keepOutput = true;
     else if (arg === "--strict") result.strict = true;
     else if (arg === "--no-diff") result.diff = false;
     else if (arg === "--headed") result.headed = true;
+    else if (arg === "--menu-strip-gate") result.menuStripGate = true;
     else if (arg.startsWith("--output=")) result.output = resolve(ROOT, arg.slice(9));
     else if (arg.startsWith("--limit=")) { result.limit = Number(arg.slice(8)); if (!Number.isInteger(result.limit) || result.limit < 1) throw new Error("--limit must be a positive integer"); }
     else if (arg.startsWith("--only=")) { result.only = new Set(arg.slice(7).split(",").filter(Boolean)); if (result.only.size === 0) throw new Error("--only must name at least one fixture"); }
@@ -44,6 +47,17 @@ async function prepare(output, keep) {
   for (const part of ["legacy", "ts", "diff", "metadata"]) await mkdir(join(output, part), { recursive: true });
 }
 async function shot(page, path) { await mkdir(dirname(path), { recursive: true }); await page.screenshot({ path, animations: "disabled", caret: "hide" }); }
+async function deadline(label, milliseconds, task) {
+  let timer;
+  try {
+    return await Promise.race([
+      task(),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`${label} timed out after ${milliseconds}ms`)), milliseconds); })
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 function legacyPlugin() {
   const root = resolve(ROOT, "public"), types = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".txt": "text/plain", ".png": "image/png", ".svg": "image/svg+xml", ".woff": "font/woff", ".woff2": "font/woff2" };
@@ -107,12 +121,21 @@ function visualRegions(layout) {
 function normalizedVisualRegions(legacy, ts) {
   const workspaceY = Math.max(legacy.workspaceOrigin.y, ts.workspaceOrigin.y);
   const sidebarX = Math.min(legacy.sidebarX, ts.sidebarX);
+  const width = VIEWPORT.width, height = VIEWPORT.height;
+  // Keep the menu-strip comparison out of the right-side controls.  The
+  // canvas is the stable common width of the two applications (1106px in the
+  // normalized desktop baseline), while the full viewport includes product-
+  // specific sidebar content that is intentionally reviewed elsewhere.
+  const menuStripWidth = Math.min(width, Math.max(0, Math.round(Math.min(
+    legacy.canvas.cssWidth,
+    ts.canvas.cssWidth
+  ))));
   const scopeY = workspaceY + Math.min(
     legacy.scopeY - legacy.workspaceOrigin.y,
     ts.scopeY - ts.workspaceOrigin.y
   );
-  const width = VIEWPORT.width, height = VIEWPORT.height;
   return {
+    menuStrip: { x: 0, y: 0, width: menuStripWidth, height: Math.min(30, height) },
     top: { x: 0, y: 0, width, height: workspaceY },
     workspace: { x: 0, y: workspaceY, width: sidebarX, height: scopeY - workspaceY },
     right: { x: sidebarX, y: workspaceY, width: width - sidebarX, height: height - workspaceY },
@@ -188,14 +211,22 @@ async function verifyMenu(page, app, entry, index) {
   if (app === "ts") {
     const summaries = page.locator(".menu-bar > details > summary"), texts = (await summaries.allTextContents()).map((text) => text.trim());
     if (texts.length !== MENUS.length || texts[index] !== tsText) throw new Error(`TS menu order/text mismatch: ${JSON.stringify(texts)}`);
-    await summaries.nth(index).click(); const menu = page.locator(".menu-bar > details").nth(index);
+    // A prior native <details> toggle can remain open while the application
+    // initializes. Close it before exercising the requested menu so a popup
+    // does not cover its own summary and turn the run into a silent retry.
+    await page.locator(".menu-bar > details[open]").evaluateAll((items) => items.forEach((item) => { item.open = false; }));
+    // The app can initially render the first popup over its summary. Invoke
+    // the native summary click after proving the element exists; Playwright's
+    // pointer action rightly refuses an obscured target and otherwise spends
+    // 30 seconds retrying. This exercises the same browser toggle event.
+    await summaries.nth(index).evaluate((summary) => summary.click()); const menu = page.locator(".menu-bar > details").nth(index);
     if (await menu.getAttribute("open") === null) throw new Error(`TS ${id} menu did not open`);
     const item = key === "tool" ? menu.locator("[data-tool]").first() : menu.locator(`[data-action="${key}"]`);
     await item.waitFor({ state: "visible", timeout: 10_000 }); return { labels: texts, keyItem: (await item.textContent())?.trim() ?? "" };
   }
   const menus = page.locator(".gwt-MenuBar-horizontal .gwt-MenuItem"), texts = (await menus.allTextContents()).map((text) => text.trim());
   if (texts.length < MENUS.length || texts[index] !== legacyText) throw new Error(`Legacy menu order/text mismatch: ${JSON.stringify(texts)}`);
-  await menus.nth(index).click(); const popup = page.locator(".gwt-MenuBarPopup, .gwt-PopupPanel").filter({ has: page.locator(".gwt-MenuItem") }).last();
+  await menus.nth(index).click(); const popup = page.locator(".gwt-MenuBarPopup:visible, .gwt-PopupPanel:visible").filter({ has: page.locator(".gwt-MenuItem") }).last();
   await popup.waitFor({ state: "visible", timeout: 10_000 }); const keyItem = (await popup.locator(".gwt-MenuItem").first().textContent())?.trim() ?? "";
   if (!keyItem) throw new Error(`Legacy ${id} menu has no visible key item`); return { labels: texts, keyItem };
 }
@@ -208,6 +239,17 @@ async function previous(output, id, files) {
   try { const value = JSON.parse(await readFile(join(output, "metadata", `${nameFor(id)}.json`), "utf8")); await Promise.all(Object.values(files).map(readFile)); return value.captureStatus === "passed" ? value : undefined; } catch { return undefined; }
 }
 function addMonitorFailures(result, monitors) { const failures = monitors.flatMap((item) => item.take()); if (failures.length) { result.status = "failed"; result.captureStatus = "failed"; result.error = [result.error, ...failures].filter(Boolean).join("\n"); } }
+function applyMenuStripGate(result, enabled) {
+  if (!enabled || result.id !== MENU_STRIP_GATE_ID) return;
+  const metric = result.regionMetrics?.menuStrip;
+  if (!result.baseline?.valid || metric === undefined) {
+    result.status = "failed";
+    result.error = [result.error, `Menu-strip gate requires a comparable ${MENU_STRIP_GATE_ID} baseline and metric.`].filter(Boolean).join("\n");
+  } else if (metric.mae > MENU_STRIP_MAE) {
+    result.status = "failed";
+    result.error = [result.error, `Menu-strip MAE ${metric.mae} exceeds ${MENU_STRIP_MAE}.`].filter(Boolean).join("\n");
+  }
+}
 async function diffRegions(context, files, legacyLayout, tsLayout) {
   const regions = normalizedVisualRegions(legacyLayout, tsLayout), metrics = {};
   // `crop.y` is expressed in the legacy page's physical coordinates.  Move
@@ -216,12 +258,12 @@ async function diffRegions(context, files, legacyLayout, tsLayout) {
   const offsets = { legacyY: 0, tsY: tsLayout.workspaceOrigin.y - legacyLayout.workspaceOrigin.y };
   for (const [name, crop] of Object.entries(regions)) {
     const path = files.diff.replace(/\.png$/, `-${name}.png`);
-    const regionOffsets = name === "top" ? undefined : offsets;
+    const regionOffsets = name === "top" || name === "menuStrip" ? undefined : offsets;
     metrics[name] = { crop, file: path, ...(await diff(context, files.legacy, files.ts, path, crop, regionOffsets)) };
   }
   return metrics;
 }
-function html(results, output) { const image = (result, kind) => result.files?.[kind] ? `<a href="${relative(output,result.files[kind]).split(sep).join("/")}"><img src="${relative(output,result.files[kind]).split(sep).join("/")}"></a>` : "-"; const regions=(result)=>result.regionMetrics?Object.entries(result.regionMetrics).map(([name,value])=>`${name}: ${(value.diffPixelRatio*100).toFixed(2)}% / ${(value.mae*100).toFixed(3)}%`).join("<br>"):"-"; return `<!doctype html><meta charset="utf-8"><style>body{font:14px system-ui}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:6px;vertical-align:top}img{width:200px}</style><p>Review when changed pixels > ${REVIEW_DIFF_PIXEL_RATIO * 100}% or MAE > ${REVIEW_MAE * 100}%. Full-page metrics are diagnostic; region metrics localize chrome/workspace differences.</p><table><tr><th>Scenario</th><th>Status</th><th>Baseline</th><th>Full diff</th><th>Top / workspace / right / bottom</th><th>Legacy</th><th>TS</th><th>Diff</th><th>Error</th></tr>${results.map((r)=>`<tr><td>${r.id}</td><td>${r.status}</td><td>${r.baseline?.valid===false?"invalid-baseline":r.baseline?.valid===true?"comparable":"-"}</td><td>${r.metrics ? `${(r.metrics.diffPixelRatio*100).toFixed(2)}% / ${(r.metrics.mae*100).toFixed(3)}%` : "-"}</td><td>${regions(r)}</td><td>${image(r,"legacy")}</td><td>${image(r,"ts")}</td><td>${image(r,"diff")}</td><td>${r.error??""}</td></tr>`).join("")}</table>`; }
+function html(results, output) { const image = (result, kind) => result.files?.[kind] ? `<a href="${relative(output,result.files[kind]).split(sep).join("/")}"><img src="${relative(output,result.files[kind]).split(sep).join("/")}"></a>` : "-"; const regions=(result)=>result.regionMetrics?Object.entries(result.regionMetrics).map(([name,value])=>`${name}: ${(value.diffPixelRatio*100).toFixed(2)}% / ${(value.mae*100).toFixed(3)}%`).join("<br>"):"-"; return `<!doctype html><meta charset="utf-8"><style>body{font:14px system-ui}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:6px;vertical-align:top}img{width:200px}</style><p>Review when changed pixels > ${REVIEW_DIFF_PIXEL_RATIO * 100}% or MAE > ${REVIEW_MAE * 100}%. Full-page metrics are diagnostic; region metrics localize menu chrome, workspace, and sidebar differences.</p><table><tr><th>Scenario</th><th>Status</th><th>Baseline</th><th>Full diff</th><th>Menu strip / top / workspace / right / bottom</th><th>Legacy</th><th>TS</th><th>Diff</th><th>Error</th></tr>${results.map((r)=>`<tr><td>${r.id}</td><td>${r.status}</td><td>${r.baseline?.valid===false?"invalid-baseline":r.baseline?.valid===true?"comparable":"-"}</td><td>${r.metrics ? `${(r.metrics.diffPixelRatio*100).toFixed(2)}% / ${(r.metrics.mae*100).toFixed(3)}%` : "-"}</td><td>${regions(r)}</td><td>${image(r,"legacy")}</td><td>${image(r,"ts")}</td><td>${image(r,"diff")}</td><td>${r.error??""}</td></tr>`).join("")}</table>`; }
 
 export async function run() {
   try {
@@ -231,13 +273,39 @@ export async function run() {
   }
   const options = optionsFrom(process.argv.slice(2)); await prepare(options.output, options.keepOutput);
   const all = await findCircuits(CIRCUITS), candidates = options.only ? all.filter((file) => options.only.has(relative(CIRCUITS, file).split(sep).join("/"))) : all, selected = (options.limit ? candidates.slice(0, options.limit) : candidates).map((file) => ({ file, id: relative(CIRCUITS, file).split(sep).join("/") }));
-  if (!selected.length) throw new Error("No circuit fixtures found"); console.log(`Capturing ${selected.length}/${all.length} static circuit scenarios.`);
+  if (!selected.length) throw new Error("No circuit fixtures found");
+  if (options.menuStripGate && (selected.length !== 1 || selected[0].id !== MENU_STRIP_GATE_ID)) throw new Error(`--menu-strip-gate requires --only=${MENU_STRIP_GATE_ID}`);
+  console.log(`Capturing ${selected.length}/${all.length} static circuit scenarios.`);
   const server = await createServer({ root: ROOT, logLevel: "error", plugins: [legacyPlugin()], server: { host: "127.0.0.1", port: 0 } }); await server.listen(); const address = server.httpServer.address(); if (!address || typeof address === "string") throw new Error("Vite did not expose a TCP address"); const baseUrl = `http://127.0.0.1:${address.port}/`;
   const browser = await chromium.launch({ headless: !options.headed }), context = await browser.newContext({ viewport: VIEWPORT, deviceScaleFactor: 1, serviceWorkers: "block" }), legacyPage = await context.newPage(), tsPage = await context.newPage(), legacyWatch = watch(legacyPage,"legacy"), tsWatch = watch(tsPage,"ts"); const results=[];
   try {
     const first = selected[0], firstSource = await readFile(first.file,"utf8");
-    for (const [index, entry] of MENUS.entries()) { const id=`__menu__${entry[0]}`, files=filesFor(options.output,`menu-${entry[0]}`), old=options.keepOutput && await previous(options.output,id,files); if(old){results.push(old);continue} const result={id,status:"passed",captureStatus:"passed",files,error:undefined,menu:{}}; legacyWatch.reset();tsWatch.reset();try{result.source={legacy:await legacyLoad(legacyPage,baseUrl,first.id,firstSource)};result.menu.legacy=await verifyMenu(legacyPage,"legacy",entry,index);await shot(legacyPage,files.legacy);result.source.ts=await tsLoad(tsPage,baseUrl,firstSource);result.menu.ts=await verifyMenu(tsPage,"ts",entry,index);await shot(tsPage,files.ts);result.baseline=comparableLayout(result.source.legacy.visualLayout,result.source.ts.visualLayout);if(!result.baseline.valid){result.status="invalid-baseline"}else if(options.diff){result.metrics=await diff(context,files.legacy,files.ts,files.diff);result.regionMetrics=await diffRegions(context,files,result.source.legacy.visualLayout,result.source.ts.visualLayout);if(result.metrics.diffPixelRatio>REVIEW_DIFF_PIXEL_RATIO||result.metrics.mae>REVIEW_MAE)result.status="review"}}catch(error){result.status="failed";result.captureStatus="failed";result.error=errorText(error)}addMonitorFailures(result,[legacyWatch,tsWatch]);await writeFile(join(options.output,"metadata",`${nameFor(id)}.json`),JSON.stringify(result,null,2));results.push(result);}
-    for(const scenario of selected){const files=filesFor(options.output,nameFor(scenario.id)),old=options.keepOutput&&await previous(options.output,scenario.id,files);if(old){results.push(old);console.log(`[resumed] ${scenario.id}`);continue}const source=await readFile(scenario.file,"utf8"),result={id:scenario.id,status:"passed",captureStatus:"passed",files,error:undefined,source:{inputSha256:sha(source)}};legacyWatch.reset();tsWatch.reset();try{result.source.legacy=await legacyLoad(legacyPage,baseUrl,scenario.id,source);await shot(legacyPage,files.legacy);result.source.ts=await tsLoad(tsPage,baseUrl,source);await shot(tsPage,files.ts);result.baseline=comparableLayout(result.source.legacy.visualLayout,result.source.ts.visualLayout);if(!result.baseline.valid){result.status="invalid-baseline"}else if(options.diff){result.metrics=await diff(context,files.legacy,files.ts,files.diff);result.regionMetrics=await diffRegions(context,files,result.source.legacy.visualLayout,result.source.ts.visualLayout);if(result.metrics.diffPixelRatio>REVIEW_DIFF_PIXEL_RATIO||result.metrics.mae>REVIEW_MAE)result.status="review"}}catch(error){result.status="failed";result.captureStatus="failed";result.error=errorText(error)}addMonitorFailures(result,[legacyWatch,tsWatch]);await writeFile(join(options.output,"metadata",`${nameFor(scenario.id)}.json`),JSON.stringify(result,null,2));results.push(result);console.log(`[${result.status}] ${scenario.id}`)}
+    for (const [index, entry] of MENUS.entries()) {
+      const id=`__menu__${entry[0]}`, files=filesFor(options.output,`menu-${entry[0]}`), old=options.keepOutput && await previous(options.output,id,files);
+      if(old){results.push(old);continue}
+      // Menus, especially the legacy cascading circuit picker, keep popup DOM
+      // state. Isolate every capture so a hidden popup cannot poison a later
+      // selector or prevent the report from being written.
+      const menuLegacyPage = await context.newPage(), menuTsPage = await context.newPage();
+      const menuLegacyWatch = watch(menuLegacyPage,"legacy menu"), menuTsWatch = watch(menuTsPage,"ts menu");
+      const result={id,status:"passed",captureStatus:"passed",files,error:undefined,menu:{}};
+      try {
+        await deadline(`Menu ${entry[0]} capture`, MENU_CAPTURE_TIMEOUT_MS, async () => {
+          result.source={legacy:await legacyLoad(menuLegacyPage,baseUrl,first.id,firstSource)};
+          result.menu.legacy=await verifyMenu(menuLegacyPage,"legacy",entry,index);
+          await shot(menuLegacyPage,files.legacy);
+          result.source.ts=await tsLoad(menuTsPage,baseUrl,firstSource);
+          result.menu.ts=await verifyMenu(menuTsPage,"ts",entry,index);
+          await shot(menuTsPage,files.ts);
+          result.baseline=comparableLayout(result.source.legacy.visualLayout,result.source.ts.visualLayout);
+          if(!result.baseline.valid){result.status="invalid-baseline"}
+          else if(options.diff){result.metrics=await diff(context,files.legacy,files.ts,files.diff);result.regionMetrics=await diffRegions(context,files,result.source.legacy.visualLayout,result.source.ts.visualLayout);if(result.metrics.diffPixelRatio>REVIEW_DIFF_PIXEL_RATIO||result.metrics.mae>REVIEW_MAE)result.status="review"}
+        });
+      } catch(error) { result.status="failed";result.captureStatus="failed";result.error=errorText(error) }
+      finally { addMonitorFailures(result,[menuLegacyWatch,menuTsWatch]); await menuLegacyPage.close().catch(() => {}); await menuTsPage.close().catch(() => {}); }
+      await writeFile(join(options.output,"metadata",`${nameFor(id)}.json`),JSON.stringify(result,null,2));results.push(result);console.log(`[${result.status}] menu ${entry[0]}`);
+    }
+    for(const scenario of selected){const files=filesFor(options.output,nameFor(scenario.id)),old=options.keepOutput&&await previous(options.output,scenario.id,files);if(old){applyMenuStripGate(old,options.menuStripGate);results.push(old);console.log(`[resumed] ${scenario.id}`);continue}const source=await readFile(scenario.file,"utf8"),result={id:scenario.id,status:"passed",captureStatus:"passed",files,error:undefined,source:{inputSha256:sha(source)}};legacyWatch.reset();tsWatch.reset();try{result.source.legacy=await legacyLoad(legacyPage,baseUrl,scenario.id,source);await shot(legacyPage,files.legacy);result.source.ts=await tsLoad(tsPage,baseUrl,source);await shot(tsPage,files.ts);result.baseline=comparableLayout(result.source.legacy.visualLayout,result.source.ts.visualLayout);if(!result.baseline.valid){result.status="invalid-baseline"}else if(options.diff){result.metrics=await diff(context,files.legacy,files.ts,files.diff);result.regionMetrics=await diffRegions(context,files,result.source.legacy.visualLayout,result.source.ts.visualLayout);if(result.metrics.diffPixelRatio>REVIEW_DIFF_PIXEL_RATIO||result.metrics.mae>REVIEW_MAE)result.status="review"}}catch(error){result.status="failed";result.captureStatus="failed";result.error=errorText(error)}addMonitorFailures(result,[legacyWatch,tsWatch]);applyMenuStripGate(result,options.menuStripGate);await writeFile(join(options.output,"metadata",`${nameFor(scenario.id)}.json`),JSON.stringify(result,null,2));results.push(result);console.log(`[${result.status}] ${scenario.id}`)}
   } finally { await context.close();await browser.close();await server.close(); }
-  const summary={passed:results.filter((r)=>r.status==="passed").length,review:results.filter((r)=>r.status==="review").length,invalidBaseline:results.filter((r)=>r.status==="invalid-baseline").length,failed:results.filter((r)=>r.status==="failed").length}; const report={generatedAt:new Date().toISOString(),viewport:VIEWPORT,thresholds:{REVIEW_DIFF_PIXEL_RATIO,REVIEW_MAE},execution:{mode:options.strict?"strict-gate":"review-collection",strict:options.strict,exitNonZeroWhen:options.strict?"review, invalid-baseline, or failed":"invalid-baseline or failed"},source:{totalScenarios:all.length,capturedScenarios:selected.length},summary,results}; await writeFile(join(options.output,"report.json"),JSON.stringify(report,null,2));await writeFile(join(options.output,"report.html"),html(results,options.output));console.log(`Report: ${join(options.output,"report.html")}`);if(summary.failed||summary.invalidBaseline||(options.strict&&summary.review))process.exitCode=1;
+  const summary={passed:results.filter((r)=>r.status==="passed").length,review:results.filter((r)=>r.status==="review").length,invalidBaseline:results.filter((r)=>r.status==="invalid-baseline").length,failed:results.filter((r)=>r.status==="failed").length}; const report={generatedAt:new Date().toISOString(),viewport:VIEWPORT,thresholds:{REVIEW_DIFF_PIXEL_RATIO,REVIEW_MAE,MENU_STRIP_MAE:options.menuStripGate?MENU_STRIP_MAE:undefined},execution:{mode:options.menuStripGate?"menu-strip-gate":options.strict?"strict-gate":"review-collection",strict:options.strict,menuStripGate:options.menuStripGate,exitNonZeroWhen:options.strict?"review, invalid-baseline, or failed":"invalid-baseline or failed"},source:{totalScenarios:all.length,capturedScenarios:selected.length},summary,results}; await writeFile(join(options.output,"report.json"),JSON.stringify(report,null,2));await writeFile(join(options.output,"report.html"),html(results,options.output));console.log(`Report: ${join(options.output,"report.html")}`);if(summary.failed||summary.invalidBaseline||(options.strict&&summary.review))process.exitCode=1;
 }

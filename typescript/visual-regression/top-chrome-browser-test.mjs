@@ -39,6 +39,7 @@ async function snapshot(page, testCase) {
       return {
         x: value.x, y: value.y, width: value.width, height: value.height,
         display: style.display, background: style.backgroundColor,
+        backgroundImage: style.backgroundImage,
         borderBottom: style.borderBottom, padding: style.padding,
         fontSize: style.fontSize, fontWeight: style.fontWeight,
         marginRight: style.marginRight, border: style.border,
@@ -49,6 +50,16 @@ async function snapshot(page, testCase) {
     return {
       menu: rect(".menu-bar"),
       summary: rect(".menu-bar summary"),
+      menuLabels: Array.from(document.querySelectorAll(".menu-bar > details > summary"), (summary) => {
+        const range = document.createRange();
+        range.selectNodeContents(summary);
+        const text = range.getBoundingClientRect();
+        const box = summary.getBoundingClientRect();
+        return {
+          text: summary.textContent?.trim(), x: box.x, width: box.width,
+          textX: text.x, padding: getComputedStyle(summary).padding
+        };
+      }),
       popup: rect(".menu-popup"),
       toolbar: rect(".tool-bar"),
       tool: rect(".tool-bar .tool-button"),
@@ -71,17 +82,32 @@ async function snapshot(page, testCase) {
 function assertCase(testCase, value) {
   const expectedOrigin = testCase.menu + testCase.toolbar;
   approximately(value.menu.height, testCase.menu, `${testCase.id} menu height`);
-  approximately(value.summary.height, testCase.menu, `${testCase.id} summary height`);
+  approximately(value.summary.height, testCase.menu - 2, `${testCase.id} summary content height`);
   approximately(value.popup.y, testCase.menu, `${testCase.id} popup y`);
   approximately(value.toolbar.height, testCase.toolbar, `${testCase.id} toolbar height`);
   approximately(value.canvas.y, expectedOrigin, `${testCase.id} canvas y`);
   approximately(value.layout.workspaceOrigin.y, expectedOrigin, `${testCase.id} layout workspace y`);
   approximately(value.layout.scopeY, value.canvas.y + value.canvas.height, `${testCase.id} scope y without scopes`);
-  assert.equal(value.menu.background, "rgb(248, 248, 248)", `${testCase.id} legacy menu background`);
+  assert.match(value.menu.backgroundImage, /linear-gradient/, `${testCase.id} legacy menu gradient`);
   assert.equal(value.toolbar.background, "rgb(248, 248, 248)", `${testCase.id} legacy toolbar background`);
   assert.match(value.toolbar.borderBottom, /1px solid rgb\(204, 204, 204\)/, `${testCase.id} legacy toolbar border`);
   assert.equal(value.summary.fontSize, "13px", `${testCase.id} menu font size`);
   assert.equal(value.summary.fontWeight, "600", `${testCase.id} menu font weight`);
+  assert.equal(value.summary.padding, testCase.menu === 30 ? "5px 10px 5px 12px" : "2px 10px 2px 12px", `${testCase.id} first menu item padding`);
+  if (testCase.id === "normal") {
+    const expectedMenuTextX = [13, 59, 105, 150, 209, 255, 300];
+    const expectedMenuWidth = [48, 46, 45, 59, 46, 45, 46];
+    const expectedMenuPadding = [
+      "5px 10px 5px 12px", "5px 10px", "5px 9px 5px 10px",
+      "5px 10px", "5px 10px", "5px 9px 5px 10px", "5px 10px"
+    ];
+    assert.equal(value.menuLabels.length, expectedMenuTextX.length, "normal top-level menu count");
+    value.menuLabels.forEach((label, index) => {
+      approximately(label.textX, expectedMenuTextX[index], `normal menu ${label.text} text x`);
+      approximately(label.width, expectedMenuWidth[index], `normal menu ${label.text} width`);
+      assert.equal(label.padding, expectedMenuPadding[index], `normal menu ${label.text} padding`);
+    });
+  }
   if (testCase.toolbar > 0) {
     approximately(value.tool.width, 35.59375, `${testCase.id} first Fontello tool outer width`);
     assert.equal(value.tool.height, 26, `${testCase.id} tool outer height`);
