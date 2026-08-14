@@ -2361,8 +2361,10 @@ export class NativeCircuitApp {
       '[data-tool="subcircuit-instance"]'
     );
     if (instance !== null) {
-      const selected = this.lastDrawSubcircuitModel !== null &&
-        CustomCompositeModel.get(this.lastDrawSubcircuitModel) !== null
+      const selectedModel = this.lastDrawSubcircuitModel === null
+        ? null
+        : CustomCompositeModel.get(this.lastDrawSubcircuitModel);
+      const selected = selectedModel !== null && selectedModel.internal !== true
         ? this.lastDrawSubcircuitModel
         : models[models.length - 1]?.name ?? null;
       instance.disabled = selected === null;
@@ -4810,10 +4812,18 @@ export class NativeCircuitApp {
   }
 
   private setTool(tool: Tool): void {
+    if (tool === "lm317") {
+      tool = `subcircuit:${encodeURIComponent("~LM317-v2")}`;
+    } else if (tool === "tl431") {
+      tool = `subcircuit:${encodeURIComponent("~TL431")}`;
+    }
     if (tool === "subcircuit-instance") {
       const preferred = this.lastDrawSubcircuitModel;
       const models = CustomCompositeModel.list();
-      const name = preferred !== null && CustomCompositeModel.get(preferred) !== null
+      const preferredModel = preferred === null
+        ? null
+        : CustomCompositeModel.get(preferred);
+      const name = preferredModel !== null && preferredModel.internal !== true
         ? preferred
         : models[models.length - 1]?.name ?? null;
       if (name === null) {

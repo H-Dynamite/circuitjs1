@@ -16,14 +16,11 @@ export interface DrawDragItem {
 }
 
 /**
- * These commands exist in the original Draw hierarchy.  LM317/TL431 depend
- * on Java's old-format built-in composite definitions, while the generic
- * instance item becomes available only if the currently loaded circuit has a
- * <ccm> model.  None is an ordinary ElementFactory tool.
+ * The generic instance item becomes available only if the currently loaded
+ * circuit has a user-defined <ccm> model. LM317/TL431 are built-in composite
+ * commands and are mapped to their preserved internal model names by the app.
  */
 export const DRAW_UNAVAILABLE_LEGACY_ITEM_IDS = [
-  "lm317",
-  "tl431",
   "subcircuit-instance"
 ] as const;
 
@@ -159,10 +156,8 @@ export const DRAW_MENU_GROUPS: DrawMenuGroup[] = [
       { id: "cccs", label: "添加电流控制电流源" },
       { id: "optocoupler", label: "添加光耦合器" },
       { id: "time-delay-relay", label: "添加延时继电器" },
-      // The legacy entries below are composite models, not ordinary element
-      // constructors.  The app deliberately renders them unavailable until
-      // their upstream built-in model definitions are ported (rather than
-      // claiming they create a working regulator).
+      // The legacy entries below are built-in composite models rather than
+      // ordinary ElementFactory constructors.
       { id: "lm317", label: "添加LM317" },
       { id: "tl431", label: "添加TL431" },
       { id: "subcircuit-instance", label: "添加子电路实例" },

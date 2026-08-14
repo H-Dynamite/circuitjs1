@@ -111,6 +111,10 @@ describe("native component catalog", () => {
         ...COMPONENTS
           .map((component) => component.id)
           .filter((id) => id !== "scope-element"),
+        // These two are constructible through the native <ccm> path rather
+        // than ElementFactory's ordinary-element registry.
+        "lm317",
+        "tl431",
         ...DRAW_UNAVAILABLE_LEGACY_ITEM_IDS
       ])
     );

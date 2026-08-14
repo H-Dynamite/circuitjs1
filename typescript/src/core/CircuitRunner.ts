@@ -143,6 +143,7 @@ export class CircuitRunner {
         record.kind === "element"
     );
     CustomCompositeModel.clear();
+    CustomCompositeModel.loadInternalModels(factory);
     for (const record of document.records) {
       if (record.kind === "model" && record.modelType === "!") {
         CustomLogicModel.undumpModel(
@@ -212,6 +213,7 @@ export class CircuitRunner {
     simulation.adjustTimeStep = (document.options.flags & 64) !== 0;
 
     CustomCompositeModel.clear();
+    CustomCompositeModel.loadInternalModels(factory);
     for (const record of document.records) {
       if (record.kind === "model") {
         CircuitRunner.loadXmlModel(record);

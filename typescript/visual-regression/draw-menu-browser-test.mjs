@@ -30,6 +30,7 @@ try {
     assert.equal(await draw.getAttribute("open"), "", "Draw opens through its visible summary");
   };
   const outputSubmenu = draw.locator(".component-submenu").filter({ hasText: "输出和标签" });
+  const activeBuildingBlocks = draw.locator(".component-submenu").filter({ hasText: "有源集成电路" });
 
   await openDraw();
   assert.deepEqual(
@@ -49,9 +50,48 @@ try {
     1,
     "embedded ScopeElm remains available only under a secondary extension path"
   );
-  for (const id of ["lm317", "tl431", "subcircuit-instance"]) {
+  for (const id of ["lm317", "tl431"]) {
     const item = draw.locator(`[data-tool="${id}"]`);
-    assert.equal(await item.isDisabled(), true, `${id} is truthfully unavailable until its legacy composite model is migrated`);
+    assert.equal(await item.isDisabled(), false, `${id} uses its native migrated built-in composite model`);
+  }
+  assert.equal(
+    await draw.locator('[data-tool="subcircuit-instance"]').isDisabled(),
+    true,
+    "generic Add Subcircuit Instance remains unavailable without a user model"
+  );
+
+  // Exercise the real visible Draw commands, not a registry mutation.  The
+  // built-in model definitions must remain available after XML export/reload
+  // without exporting Java-era <ccm> data into the user circuit.
+  for (const [tool, model] of [["lm317", "~LM317-v2"], ["tl431", "~TL431"]]) {
+    await page.evaluate((source) => window.CircuitJS1TS.loadCircuit(source), '<cir ts="0.000005"/>');
+    await openDraw();
+    await activeBuildingBlocks.locator(":scope > .component-submenu-label").hover();
+    await draw.locator(`[data-tool="${tool}"]`).click();
+    const builtinCanvas = page.locator("#circuit-canvas");
+    const builtinBox = await builtinCanvas.boundingBox();
+    assert.ok(builtinBox, `${tool} canvas is visible`);
+    await page.mouse.move(builtinBox.x + 300, builtinBox.y + 250);
+    await page.mouse.down();
+    await page.mouse.move(builtinBox.x + 390, builtinBox.y + 250);
+    await page.mouse.up();
+    assert.equal(
+      await page.evaluate(() => window.CircuitJS1TS.getElements()[0]?.modelName),
+      model,
+      `${tool} Draw command creates its original named composite model`
+    );
+    const builtinExport = await page.evaluate(() => window.CircuitJS1TS.exportCircuit());
+    assert.match(builtinExport, new RegExp(`<cc\\b[^>]*mo="${model}"`, "u"), `${tool} instance exports by model name`);
+    assert.doesNotMatch(builtinExport, /<ccm\b/u, `${tool} does not leak an internal model definition into export`);
+    await page.evaluate((source) => window.CircuitJS1TS.loadCircuit(source), builtinExport);
+    const builtinSolved = await page.evaluate(() => {
+      try {
+        return window.CircuitJS1TS.stepSimulation(1).steps;
+      } catch (error) {
+        return String(error);
+      }
+    });
+    assert.equal(builtinSolved, 1, `${tool} exports, reloads, and participates in a real solver step`);
   }
 
   // This is an imported XML model, not a test-only registry mutation.  It is
