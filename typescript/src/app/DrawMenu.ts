@@ -15,6 +15,18 @@ export interface DrawDragItem {
   shortcut?: string;
 }
 
+/**
+ * These commands exist in the original Draw hierarchy.  LM317/TL431 depend
+ * on Java's old-format built-in composite definitions, while the generic
+ * instance item becomes available only if the currently loaded circuit has a
+ * <ccm> model.  None is an ordinary ElementFactory tool.
+ */
+export const DRAW_UNAVAILABLE_LEGACY_ITEM_IDS = [
+  "lm317",
+  "tl431",
+  "subcircuit-instance"
+] as const;
+
 export const DRAW_MENU_DIRECT_ITEMS: DrawMenuItem[] = [
   { id: "wire", label: "添加导线", shortcut: "w" },
   { id: "routed-wire", label: "添加布线导线", shortcut: "W" },
@@ -88,7 +100,6 @@ export const DRAW_MENU_GROUPS: DrawMenuGroup[] = [
       { id: "line", label: "添加线条" },
       { id: "labeled-node", label: "添加标记的节点" },
       { id: "probe", label: "添加电压表/示波器探头" },
-      { id: "scope-element", label: "添加示波器探针" },
       { id: "ohmmeter", label: "添加欧姆表" },
       { id: "ammeter", label: "添加电流表" },
       { id: "wattmeter", label: "添加瓦特表" },
@@ -148,6 +159,13 @@ export const DRAW_MENU_GROUPS: DrawMenuGroup[] = [
       { id: "cccs", label: "添加电流控制电流源" },
       { id: "optocoupler", label: "添加光耦合器" },
       { id: "time-delay-relay", label: "添加延时继电器" },
+      // The legacy entries below are composite models, not ordinary element
+      // constructors.  The app deliberately renders them unavailable until
+      // their upstream built-in model definitions are ported (rather than
+      // claiming they create a working regulator).
+      { id: "lm317", label: "添加LM317" },
+      { id: "tl431", label: "添加TL431" },
+      { id: "subcircuit-instance", label: "添加子电路实例" },
       { id: "motor-protection-switch", label: "添加电机保护开关" }
     ]
   },
@@ -211,4 +229,14 @@ export const DRAW_DRAG_ITEMS: DrawDragItem[] = [
   { action: "drag-column", label: "拖动列", shortcut: "(Alt-Meta-拖动)" },
   { action: "drag-selected", label: "拖动选择的元件" },
   { action: "drag-post", label: "拖动端点", shortcut: "(Ctrl-拖动)" }
+];
+
+/**
+ * ScopeElm is a TypeScript extension.  The original Draw > Outputs and
+ * Labels submenu does not contain it: legacy creates undocked scopes from a
+ * component context menu instead.  Keep it isolated so it cannot shift the
+ * historical Draw paths.
+ */
+export const DRAW_EXTENSION_ITEMS: DrawMenuItem[] = [
+  { id: "scope-element", label: "添加嵌入式示波器" }
 ];

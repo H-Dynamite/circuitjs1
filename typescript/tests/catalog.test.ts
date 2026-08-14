@@ -1,8 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { COMPONENTS, NativeCircuitApp } from "../src/app/NativeCircuitApp";
 import {
+  DRAW_EXTENSION_ITEMS,
   DRAW_MENU_DIRECT_ITEMS,
-  DRAW_MENU_GROUPS
+  DRAW_MENU_GROUPS,
+  DRAW_UNAVAILABLE_LEGACY_ITEM_IDS
 } from "../src/app/DrawMenu";
 import { ElementFactory, StringTokenizer } from "../src/core";
 import {
@@ -96,7 +98,7 @@ describe("native component catalog", () => {
     expect(failures).toEqual([]);
   });
 
-  it("keeps every drawing tool in the legacy menu hierarchy", () => {
+  it("keeps every constructible drawing tool in its legacy hierarchy", () => {
     const menuIds = [
       ...DRAW_MENU_DIRECT_ITEMS.map((item) => item.id),
       ...DRAW_MENU_GROUPS.flatMap((group) =>
@@ -105,8 +107,18 @@ describe("native component catalog", () => {
     ];
     expect(new Set(menuIds).size).toBe(menuIds.length);
     expect(new Set(menuIds)).toEqual(
-      new Set(COMPONENTS.map((component) => component.id))
+      new Set([
+        ...COMPONENTS
+          .map((component) => component.id)
+          .filter((id) => id !== "scope-element"),
+        ...DRAW_UNAVAILABLE_LEGACY_ITEM_IDS
+      ])
     );
+    // ScopeElm is a TS extension: original CircuitJS creates it from the
+    // context-menu's undocked-scope path, not Draw > Outputs and Labels.
+    expect(DRAW_EXTENSION_ITEMS.map((item) => item.id)).toEqual([
+      "scope-element"
+    ]);
   });
 
   it("keeps every original menu line, including duplicate source ids", () => {

@@ -51,8 +51,10 @@ import {
 } from "../ui/CircuitCanvasRenderer";
 import {
   DRAW_DRAG_ITEMS,
+  DRAW_EXTENSION_ITEMS,
   DRAW_MENU_DIRECT_ITEMS,
   DRAW_MENU_GROUPS,
+  DRAW_UNAVAILABLE_LEGACY_ITEM_IDS,
   type DrawMenuItem
 } from "./DrawMenu";
 
@@ -446,6 +448,8 @@ export class NativeCircuitApp {
   private historyIndex = -1;
   private scopeGroups: ScopeGroup[] = [];
   private heldMomentarySwitch: SwitchElm | null = null;
+  /** Legacy CustomCompositeElm remembers the most recently chosen model. */
+  private lastDrawSubcircuitModel: string | null = null;
   private lastFrameTime = performance.now();
   private errorMessage: string | null = null;
   private static readonly AUTOSAVE_KEY = "circuitjs1-ts-autosave";
@@ -552,6 +556,7 @@ export class NativeCircuitApp {
     this.updateRunButtonAppearance();
     this.syncResistorToolbarIcon();
     this.configureScopeChannels();
+    this.refreshDrawSubcircuitMenu();
     this.commitHistory(false);
     this.updateInspector();
     this.setTool("select");
@@ -582,6 +587,7 @@ export class NativeCircuitApp {
     this.elementDragMoved = false;
     this.errorMessage = null;
     this.configureScopeChannels();
+    this.refreshDrawSubcircuitMenu();
     this.syncOptionButtons();
     if (recordHistory) {
       this.commitHistory();
@@ -2325,6 +2331,47 @@ export class NativeCircuitApp {
     if (deleteButton !== null) deleteButton.disabled = models.length === 0;
   }
 
+  /**
+   * Keep Draw > Subcircuits tied to the same registry used by loading and
+   * exporting XML.  It is deliberately rebuilt after every model mutation so
+   * it cannot become a stale visual list of unavailable models.
+   */
+  private refreshDrawSubcircuitMenu(): void {
+    const list = this.root.querySelector<HTMLElement>("#draw-subcircuit-items");
+    if (list === null) return;
+    list.replaceChildren();
+    const models = CustomCompositeModel.list();
+    for (const model of models) {
+      const button = document.createElement("button");
+      button.dataset.tool = `subcircuit:${encodeURIComponent(model.name)}`;
+      const label = document.createElement("span");
+      label.textContent = `添加 ${model.name}`;
+      button.append(label);
+      list.append(button);
+    }
+    const empty = models.length === 0;
+    list.classList.toggle("empty-submenu", empty);
+    if (empty) {
+      const hint = document.createElement("span");
+      hint.className = "submenu-empty-hint";
+      hint.textContent = "当前电路没有可实例化的子电路";
+      list.append(hint);
+    }
+    const instance = this.root.querySelector<HTMLButtonElement>(
+      '[data-tool="subcircuit-instance"]'
+    );
+    if (instance !== null) {
+      const selected = this.lastDrawSubcircuitModel !== null &&
+        CustomCompositeModel.get(this.lastDrawSubcircuitModel) !== null
+        ? this.lastDrawSubcircuitModel
+        : models[models.length - 1]?.name ?? null;
+      instance.disabled = selected === null;
+      instance.title = selected === null
+        ? "当前电路没有可实例化的子电路"
+        : `使用子电路“${selected}”`;
+    }
+  }
+
   private openSubcircuitDialog(): void {
     this.renderSubcircuitList();
     this.requireElement(
@@ -2384,6 +2431,7 @@ export class NativeCircuitApp {
       ];
       this.runner.sourceFormat = "xml";
       this.commitHistory();
+      this.refreshDrawSubcircuitMenu();
       this.requireElement(
         "subcircuit-create-dialog",
         HTMLDialogElement
@@ -2531,6 +2579,7 @@ export class NativeCircuitApp {
       );
     this.commitHistory();
     this.renderSubcircuitList();
+    this.refreshDrawSubcircuitMenu();
   }
 
   private loadApplicationSettings(): void {
@@ -3127,6 +3176,14 @@ export class NativeCircuitApp {
     if (tool === "select") {
       return;
     }
+    if (tool.startsWith("subcircuit:")) {
+      this.addSubcircuitElement(
+        decodeURIComponent(tool.slice("subcircuit:".length)),
+        start,
+        end
+      );
+      return;
+    }
     const selected = COMPONENT_BY_ID.get(tool);
     if (selected === undefined) {
       this.showError(new Error(`未知元件工具：${tool}`));
@@ -3147,6 +3204,41 @@ export class NativeCircuitApp {
     }
     element.setPoints();
     if (selected.xmlOnly) this.runner.sourceFormat = "xml";
+    this.runner.elements.push(element);
+    this.runner.analyzed = false;
+    this.selectedIndex = this.runner.elements.length - 1;
+    this.selectedIndices.clear();
+    this.selectedIndices.add(this.selectedIndex);
+    this.configureScopeChannels();
+    this.commitHistory();
+    this.updateInspector();
+  }
+
+  /** Instantiate an already loaded <ccm> through the same XML path used for
+   * imported instances.  This avoids a UI-only stand-in and preserves the
+   * model name/state in normal export and reload. */
+  private addSubcircuitElement(name: string, start: Point, end: Point): void {
+    if (CustomCompositeModel.get(name) === null) {
+      this.showError(new Error(`子电路模型“${name}”不在当前电路中。`));
+      this.refreshDrawSubcircuitMenu();
+      return;
+    }
+    const element = this.factory.createFromXmlRecord({
+      tagName: "cc",
+      attributes: {
+        x: `${start.x} ${start.y} ${end.x} ${end.y}`,
+        f: "0",
+        mo: name
+      },
+      contents: null,
+      children: [],
+      kind: "element"
+    });
+    if (element === null) {
+      this.showError(new Error(`无法创建子电路“${name}”。`));
+      return;
+    }
+    this.runner.sourceFormat = "xml";
     this.runner.elements.push(element);
     this.runner.analyzed = false;
     this.selectedIndex = this.runner.elements.length - 1;
@@ -4718,9 +4810,27 @@ export class NativeCircuitApp {
   }
 
   private setTool(tool: Tool): void {
+    if (tool === "subcircuit-instance") {
+      const preferred = this.lastDrawSubcircuitModel;
+      const models = CustomCompositeModel.list();
+      const name = preferred !== null && CustomCompositeModel.get(preferred) !== null
+        ? preferred
+        : models[models.length - 1]?.name ?? null;
+      if (name === null) {
+        this.showError(new Error("当前电路没有可实例化的子电路。"));
+        return;
+      }
+      tool = `subcircuit:${encodeURIComponent(name)}`;
+    }
     if (this.editDisabled && tool !== "select") {
       this.notifyEditingDisabled();
       return;
+    }
+    if (tool.startsWith("subcircuit:")) {
+      this.lastDrawSubcircuitModel = decodeURIComponent(
+        tool.slice("subcircuit:".length)
+      );
+      this.refreshDrawSubcircuitMenu();
     }
     this.activeTool = tool;
     this.toolButtons.forEach((button) =>
@@ -4733,7 +4843,9 @@ export class NativeCircuitApp {
       modeLabel.textContent =
         tool === "select"
           ? "模式：选择"
-          : `模式：${COMPONENT_BY_ID.get(tool)?.label ?? tool}`;
+          : `模式：${tool.startsWith("subcircuit:")
+              ? decodeURIComponent(tool.slice("subcircuit:".length))
+              : COMPONENT_BY_ID.get(tool)?.label ?? tool}`;
     }
   }
 
@@ -4891,8 +5003,17 @@ export class NativeCircuitApp {
   }
 
   private static componentMenu(): string {
+    const unavailableLegacyComposite = new Set<string>(
+      DRAW_UNAVAILABLE_LEGACY_ITEM_IDS.filter(
+        (id) => id !== "subcircuit-instance"
+      )
+    );
     const toolButton = (item: DrawMenuItem) =>
-      `<button data-tool="${item.id}"><span>${item.label}</span>` +
+      `<button data-tool="${item.id}"${unavailableLegacyComposite.has(item.id)
+        ? ' disabled title="原版内置复合模型尚未完成 XML 迁移"'
+        : item.id === "subcircuit-instance"
+          ? ' disabled title="当前电路没有可实例化的子电路"'
+        : ""}><span>${item.label}</span>` +
       `${item.shortcut ? `<kbd>${item.shortcut}</kbd>` : ""}</button>`;
     const group = (
       label: string,
@@ -4915,7 +5036,15 @@ export class NativeCircuitApp {
       ).join(""),
       "drag-submenu"
     );
-    const subcircuits = group("子电路", "", "empty-submenu");
+    const subcircuits = group(
+      "子电路",
+      '<div id="draw-subcircuit-items" class="draw-subcircuit-items"></div>'
+    );
+    const extensions = group(
+      "TypeScript 扩展",
+      DRAW_EXTENSION_ITEMS.map(toolButton).join(""),
+      "draw-extension-submenu"
+    );
     return (
       direct +
       "<hr>" +
@@ -4924,7 +5053,8 @@ export class NativeCircuitApp {
       drag +
       "<hr>" +
       '<button class="select-drag-item" data-tool="select">' +
-      "<span>选择/框选（空格或Shift-拖动）</span></button>"
+      "<span>选择/框选（空格或Shift-拖动）</span></button>" +
+      extensions
     );
   }
 
