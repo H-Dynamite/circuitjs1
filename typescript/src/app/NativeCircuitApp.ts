@@ -4766,6 +4766,16 @@ export class NativeCircuitApp {
     setDisabled("flip-x", !canFlipX);
     setDisabled("flip-y", !canFlipY);
     setDisabled("flip-xy", !canFlipXY);
+    // CirSim only enables this legacy Tools command while at least one
+    // ordinary wire can actually be replaced.  Routed wires are already in
+    // their final form and therefore must not make the command look active.
+    setDisabled(
+      "convert-wires",
+      this.editDisabled ||
+        !this.runner.elements.some(
+          (element) => element instanceof WireElm && !(element instanceof RoutedWireElm)
+        )
+    );
   }
 
   private onKeyDown(event: KeyboardEvent): void {
@@ -5184,14 +5194,12 @@ export class NativeCircuitApp {
             <button data-action="toggle-disable-editing">禁用编辑</button>
             <button data-action="toggle-wheel-edit">滚轮编辑数值</button>
             <button data-action="shortcuts">快捷键...</button>
-            <button data-action="subcircuits">Subcircuits...</button>
             <button data-action="other-options">其他选项...</button>
             <button class="modification-setup" data-action="modification-setup">Modification Setup...</button>
           </div></details>
-          <details><summary>工具</summary><div class="menu-popup">
-            <button data-action="convert-wires">导线转换为正交导线</button>
-            <button data-action="fit">居中电路</button>
-            <button data-action="reset">重置仿真</button>
+          <details data-menu="tools"><summary>工具</summary><div class="menu-popup">
+            <button data-action="convert-wires">将导线转换为布线导线</button>
+            <button data-action="subcircuits">子电路管理器...</button>
           </div></details>
           <details><summary>电路</summary><div class="menu-popup component-menu example-menu">
             ${NativeCircuitApp.circuitExamplesMenu()}

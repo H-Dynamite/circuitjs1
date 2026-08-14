@@ -12,7 +12,7 @@ const MENU_CAPTURE_TIMEOUT_MS = 60_000;
 const MENUS = [
   ["file", "\u6587\u4ef6", "\u6587\u4ef6", "new"], ["edit", "\u7f16\u8f91", "\u7f16\u8f91", "undo"],
   ["draw", "\u7ed8\u5236", "\u7ed8\u5236", "tool"], ["scopes", "\u793a\u6ce2\u5668", "\u793a\u6ce2\u5668", "scope-stack"],
-  ["options", "\u9009\u9879", "\u9009\u9879", "toggle-current"], ["tools", "\u5de5\u5177", "\u5de5\u5177", "reset"],
+  ["options", "\u9009\u9879", "\u9009\u9879", "toggle-current"], ["tools", "\u5de5\u5177", "\u5de5\u5177", "subcircuits"],
   ["circuits", "\u7535\u8def", "\u7535\u8def", "circuit-first"]
 ];
 const sha = (value) => createHash("sha256").update(value).digest("hex");
