@@ -238,12 +238,24 @@ describe("options menu functionality", () => {
         "o 1 64 3 0 0.05 1 1"
       ].join("\n")
     );
-    for (const action of scopeActions) {
-      expect(
-        root!.querySelector<HTMLButtonElement>(`[data-action="${action}"]`)
-          ?.disabled
-      ).toBe(false);
-    }
+    // ScopePopupMenu enables Stack/Unstack from the final scope position,
+    // rather than treating every pair of scopes as both actions being ready.
+    expect(
+      root!.querySelector<HTMLButtonElement>('[data-action="scope-stack"]')
+        ?.disabled
+    ).toBe(false);
+    expect(
+      root!.querySelector<HTMLButtonElement>('[data-action="scope-unstack"]')
+        ?.disabled
+    ).toBe(true);
+    expect(
+      root!.querySelector<HTMLButtonElement>('[data-action="scope-combine"]')
+        ?.disabled
+    ).toBe(false);
+    expect(
+      root!.querySelector<HTMLButtonElement>('[data-action="scope-separate"]')
+        ?.disabled
+    ).toBe(false);
 
     const scopePanels = () =>
       app.api.getDynamicSnapshot().scopes.map((scope) => scope.panel);
@@ -257,6 +269,16 @@ describe("options menu functionality", () => {
       .querySelector<HTMLButtonElement>('[data-action="scope-stack"]')
       ?.click();
     expect(scopePanels()).toEqual([0, 0]);
+    expect(
+      root!
+        .querySelector<HTMLButtonElement>('[data-action="scope-stack"]')
+        ?.disabled
+    ).toBe(true);
+    expect(
+      root!
+        .querySelector<HTMLButtonElement>('[data-action="scope-unstack"]')
+        ?.disabled
+    ).toBe(false);
 
     root!
       .querySelector<HTMLButtonElement>('[data-action="scope-unstack"]')
@@ -270,9 +292,11 @@ describe("options menu functionality", () => {
     expect(scopeIds()).toEqual([0, 0]);
     expect(app.api.getDynamicSnapshot().scopes.map((scope) => scope.plotCount)).toEqual([2, 2]);
 
-    root!
-      .querySelector<HTMLButtonElement>('[data-action="scope-unstack"]')
-      ?.click();
+    expect(
+      root!
+        .querySelector<HTMLButtonElement>('[data-action="scope-unstack"]')
+        ?.disabled
+    ).toBe(true);
     expect(scopePanels()).toEqual([0, 0]);
     expect(app.api.getDynamicSnapshot().scopeCount).toBe(1);
     expect(

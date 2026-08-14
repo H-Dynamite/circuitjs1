@@ -782,6 +782,7 @@ export class NativeCircuitApp {
       const actionButton = target.closest<HTMLElement>("[data-action]");
       if (actionButton !== null) {
         actionButton.closest("details")?.removeAttribute("open");
+        this.closeMainMenus();
         actionButton.closest(".context-menu")?.setAttribute("hidden", "");
         this.handleAction(actionButton.dataset.action ?? "");
       }
@@ -2033,19 +2034,25 @@ export class NativeCircuitApp {
         String(action === `drag-${this.dragMode}`)
       );
     }
-    const canArrangeScopes = this.scopeCount() >= 2;
-    const canSeparateScopes = this.scopeGroups.some((group) => group.plots.length >= 2);
-    for (const action of ["scope-stack", "scope-unstack", "scope-combine"]) {
+    // ScopePopupMenu bases its availability on the legacy scope *position*,
+    // not simply on whether there are two scopes.  In particular, Stack is a
+    // no-op after all scopes already share position 0, and Unstack is a no-op
+    // after the final scope is already at its own position.  Keep the same
+    // state machine while ScopeGroup remains responsible for preserving
+    // multi-plot V/I pairs during the actual transformation.
+    const count = this.scopeCount();
+    const lastPosition = this.scopeGroups[count - 1]?.panel ?? 0;
+    const available: Record<string, boolean> = {
+      "scope-stack": count > 1 && lastPosition > 0,
+      "scope-unstack": count > 1 && lastPosition !== count - 1,
+      "scope-combine": count > 1,
+      "scope-separate": count > 0
+    };
+    for (const [action, enabled] of Object.entries(available)) {
       const button = this.root.querySelector<HTMLButtonElement>(
         `[data-action="${action}"]`
       );
-      if (button !== null) button.disabled = !canArrangeScopes;
-    }
-    const separateButton = this.root.querySelector<HTMLButtonElement>(
-      '[data-action="scope-separate"]'
-    );
-    if (separateButton !== null) {
-      separateButton.disabled = !(canArrangeScopes || canSeparateScopes);
+      if (button !== null) button.disabled = !enabled;
     }
   }
 
@@ -5039,14 +5046,17 @@ export class NativeCircuitApp {
           <details><summary>绘制</summary><div class="menu-popup component-menu">
             ${NativeCircuitApp.componentMenu()}
           </div></details>
-          <details><summary>示波器</summary><div class="menu-popup">
+          <details><summary>示波器</summary><div class="menu-popup scope-menu">
             <button data-action="scope-stack">全部堆叠</button>
             <button data-action="scope-unstack">全部分栏</button>
             <button data-action="scope-combine">合并曲线</button>
             <button data-action="scope-separate">分离曲线</button>
-            <hr>
-            <button data-action="scope-reset">清除波形</button>
-            <button data-action="scope-export-csv">导出 CSV…</button>
+            <details class="scope-extension-menu"><summary>扩展功能 ›</summary>
+              <div class="scope-extension-popup">
+                <button data-action="scope-reset">清除波形</button>
+                <button data-action="scope-export-csv">导出 CSV…</button>
+              </div>
+            </details>
           </div></details>
           <details><summary>选项</summary><div class="menu-popup option-menu">
             <button data-action="toggle-current">显示电流动画</button>
