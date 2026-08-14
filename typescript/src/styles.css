@@ -299,8 +299,13 @@ button {
   background: #d5d9df;
 }
 
-.menu-popup button:hover {
+.menu-popup button:hover:not(:disabled) {
   background: #dbeafe;
+}
+
+.menu-popup button:disabled {
+  color: #9ca3af;
+  cursor: default;
 }
 
 /* The first four ScopePopupMenu entries are the original CircuitJS1 menu.
@@ -331,6 +336,42 @@ button {
 }
 
 .scope-extension-popup {
+  position: absolute;
+  top: -1px;
+  left: 100%;
+  z-index: 4;
+  min-width: 132px;
+  padding: 3px 0;
+  border: 1px solid #b7bdc8;
+  background: #fff;
+  box-shadow: 1px 1px 3px rgb(0 0 0 / 18%);
+}
+
+.edit-extension-menu {
+  position: relative;
+}
+
+.edit-extension-menu > summary {
+  display: flex;
+  align-items: center;
+  min-height: 20px;
+  padding: 2px 7px;
+  color: #111;
+  cursor: default;
+  list-style: none;
+  font: 13px/16px Arial, "Microsoft YaHei", sans-serif;
+}
+
+.edit-extension-menu > summary::-webkit-details-marker {
+  display: none;
+}
+
+.edit-extension-menu > summary:hover,
+.edit-extension-menu[open] > summary {
+  background: #dbeafe;
+}
+
+.edit-extension-popup {
   position: absolute;
   top: -1px;
   left: 100%;

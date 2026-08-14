@@ -456,6 +456,10 @@ export class CircuitElm {
     return true;
   }
 
+  public canFlipXY(): boolean {
+    return this.canFlipX() || this.canFlipY();
+  }
+
   public comparePair(x1: number, x2: number, y1: number, y2: number): boolean {
     return (x1 === y1 && x2 === y2) || (x1 === y2 && x2 === y1);
   }

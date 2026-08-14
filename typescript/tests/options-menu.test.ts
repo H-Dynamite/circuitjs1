@@ -409,6 +409,44 @@ describe("options menu functionality", () => {
     );
   });
 
+  it("synchronizes Edit availability with history, selection, flip capability, and Disable Editing", () => {
+    const root = document.querySelector<HTMLElement>("#app");
+    expect(root).not.toBeNull();
+    const app = new NativeCircuitApp(root!);
+    const action = (name: string) =>
+      root!.querySelector<HTMLButtonElement>(`[data-action="${name}"]`)!;
+
+    for (const name of ["undo", "redo", "paste", "cut", "copy"]) {
+      expect(action(name).disabled).toBe(true);
+    }
+    action("select-all").click();
+    expect(action("cut").disabled).toBe(false);
+    expect(action("copy").disabled).toBe(false);
+    action("copy").click();
+    expect(action("paste").disabled).toBe(false);
+
+    app.api.loadCircuit(readFileSync("src/examples/circuits/3motor.txt", "utf8"));
+    // With no explicit selection the legacy MouseManager checks every element.
+    expect(action("flip-x").disabled).toBe(true);
+    expect(action("flip-y").disabled).toBe(true);
+    expect(action("flip-xy").disabled).toBe(true);
+
+    action("toggle-disable-editing").click();
+    expect(
+      root!.querySelector('.menu-bar > details[data-menu="edit"] > summary')
+        ?.getAttribute("aria-disabled")
+    ).toBeNull();
+    expect(
+      root!.querySelector('.menu-bar > details[data-menu="draw"] > summary')
+        ?.getAttribute("aria-disabled")
+    ).toBeNull();
+    expect(action("select-all").disabled).toBe(false);
+    action("select-all").click();
+    expect(root!.querySelector("#native-status")?.textContent).toContain(
+      "Editing disabled"
+    );
+  });
+
   it("keeps a voltage/current pair together when separating a combined scope", () => {
     const root = document.querySelector<HTMLElement>("#app");
     const app = new NativeCircuitApp(root!);

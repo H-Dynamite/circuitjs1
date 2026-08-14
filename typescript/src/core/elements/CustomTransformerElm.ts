@@ -89,6 +89,12 @@ export class CustomTransformerElm extends CircuitElm {
     return this.nodeCount || 4;
   }
 
+  // The legacy CustomTransformerElm has no supported vertical/axis-exchange
+  // representation, even though ordinary horizontal flips remain available.
+  public override canFlipXY(): boolean {
+    return false;
+  }
+
   public isTrapezoidal(): boolean {
     return !this.hasFlag(Inductor.FLAG_BACK_EULER);
   }

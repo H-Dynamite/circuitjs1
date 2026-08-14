@@ -991,6 +991,20 @@ export class NativeCircuitApp {
   }
 
   private handleAction(action: string): void {
+    if (
+      this.editDisabled &&
+      [
+        "undo", "redo", "delete", "cut", "copy", "paste", "duplicate",
+        "select-all", "search-component", "zoom-100", "zoom-in", "zoom-out",
+        "flip-x", "flip-y", "flip-xy", "fit", "scope-stack",
+        "scope-unstack", "scope-separate", "scope-combine", "scope-reset",
+        "scope-export-csv", "convert-wires", "edit-selected", "scope-selected",
+        "swap-terminals", "split-wire"
+      ].includes(action)
+    ) {
+      this.notifyEditingDisabled();
+      return;
+    }
     switch (action) {
       case "new":
         this.createNewCircuit();
@@ -1118,7 +1132,7 @@ export class NativeCircuitApp {
         this.splitSelectedWire();
         break;
       case "fit":
-        this.fitToView();
+        this.centerCircuit();
         break;
       case "scope-stack":
         this.stackAllScopes();
@@ -1409,6 +1423,10 @@ export class NativeCircuitApp {
   }
 
   private selectAll(): void {
+    if (this.editDisabled) {
+      this.notifyEditingDisabled();
+      return;
+    }
     this.selectedIndices.clear();
     this.runner.elements.forEach((_, index) =>
       this.selectedIndices.add(index)
@@ -1421,6 +1439,10 @@ export class NativeCircuitApp {
   }
 
   private copySelection(writeToSystemClipboard = true): void {
+    if (this.editDisabled) {
+      this.notifyEditingDisabled();
+      return;
+    }
     if (this.selectedIndices.size === 0) return;
     const document = globalThis.document.implementation.createDocument(
       "",
@@ -1446,10 +1468,14 @@ export class NativeCircuitApp {
     if (writeToSystemClipboard) {
       void navigator.clipboard?.writeText(this.clipboard);
     }
+    this.syncEditMenuState();
   }
 
   private async pasteSelection(): Promise<void> {
-    if (this.editDisabled) return;
+    if (this.editDisabled) {
+      this.notifyEditingDisabled();
+      return;
+    }
     let source = this.clipboard;
     if (source.length === 0) {
       try {
@@ -1488,24 +1514,30 @@ export class NativeCircuitApp {
   }
 
   private flipSelection(axis: "x" | "y" | "xy"): void {
-    if (this.editDisabled || this.selectedIndices.size === 0) return;
-    const elements = [...this.selectedIndices].map(
-      (index) => this.runner.elements[index]
-    );
+    if (this.editDisabled) {
+      this.notifyEditingDisabled();
+      return;
+    }
+    const selected = this.selectedIndices.size > 0;
+    const elements = selected
+      ? [...this.selectedIndices]
+          .map((index) => this.runner.elements[index])
+          .filter((element): element is CircuitElm => element !== undefined)
+      : this.runner.elements;
+    if (elements.length === 0) return;
     const xs = elements.flatMap((element) => [element.x, element.x2]);
     const ys = elements.flatMap((element) => [element.y, element.y2]);
-    const centerX = (Math.min(...xs) + Math.max(...xs)) / 2;
-    const centerY = (Math.min(...ys) + Math.max(...ys)) / 2;
+    const center2X = Math.min(...xs) + Math.max(...xs);
+    const center2Y = Math.min(...ys) + Math.max(...ys);
+    const count = selected ? elements.length : 0;
     for (const element of elements) {
-      element.setPosition(
-        axis === "x" || axis === "xy" ? 2 * centerX - element.x : element.x,
-        axis === "y" || axis === "xy" ? 2 * centerY - element.y : element.y,
-        axis === "x" || axis === "xy" ? 2 * centerX - element.x2 : element.x2,
-        axis === "y" || axis === "xy" ? 2 * centerY - element.y2 : element.y2
-      );
+      if (axis === "x") element.flipX(center2X, count);
+      else if (axis === "y") element.flipY(center2Y, count);
+      else element.flipXY(this.snap((center2X - center2Y) / 2), count);
     }
     this.runner.analyzed = false;
     this.commitHistory();
+    this.updateInspector();
   }
 
   private canEditElement(element: CircuitElm): boolean {
@@ -1968,6 +2000,7 @@ export class NativeCircuitApp {
         break;
     }
     this.syncOptionButtons();
+    this.syncEditMenuState();
   }
 
   private isOptionEnabled(action: string): boolean {
@@ -3382,6 +3415,7 @@ export class NativeCircuitApp {
 
   private deleteSelected(): void {
     if (this.editDisabled || this.selectedIndices.size === 0) {
+      if (this.editDisabled) this.notifyEditingDisabled();
       return;
     }
     const selected = [...this.selectedIndices].sort((a, b) => b - a);
@@ -3540,22 +3574,27 @@ export class NativeCircuitApp {
       this.history.shift();
     }
     this.historyIndex = this.history.length - 1;
+    this.syncEditMenuState();
   }
 
   private undo(): void {
-    if (this.historyIndex <= 0) {
+    if (this.editDisabled || this.historyIndex <= 0) {
+      if (this.editDisabled) this.notifyEditingDisabled();
       return;
     }
     this.historyIndex -= 1;
     this.loadCircuit(this.history[this.historyIndex], true, false);
+    this.syncEditMenuState();
   }
 
   private redo(): void {
-    if (this.historyIndex >= this.history.length - 1) {
+    if (this.editDisabled || this.historyIndex >= this.history.length - 1) {
+      if (this.editDisabled) this.notifyEditingDisabled();
       return;
     }
     this.historyIndex += 1;
     this.loadCircuit(this.history[this.historyIndex], true, false);
+    this.syncEditMenuState();
   }
 
   private downloadCircuit(): void {
@@ -3686,7 +3725,10 @@ export class NativeCircuitApp {
   }
 
   private convertWiresToRouted(): void {
-    if (this.editDisabled) return;
+    if (this.editDisabled) {
+      this.notifyEditingDisabled();
+      return;
+    }
     let changed = false;
     const converted = this.runner.elements.map((element) => {
       if (!(element instanceof WireElm) || element instanceof RoutedWireElm) {
@@ -4027,6 +4069,7 @@ export class NativeCircuitApp {
           )?.inductance
     );
     this.renderElementProperties(selected);
+    this.syncEditMenuState();
   }
 
   private renderElementProperties(element: CircuitElm | null): void {
@@ -4652,7 +4695,33 @@ export class NativeCircuitApp {
     );
   }
 
+  /**
+   * Match the Edit > Center Circuit command: it recentres the existing view
+   * without changing the user's zoom. `fitToView()` is reserved for initial
+   * loading and viewport resize, where establishing a scale is intentional.
+   */
+  private centerCircuit(): void {
+    this.resizeCanvases();
+    const { elements } = this.runner;
+    const scale = this.renderer.viewport.scale;
+    if (elements.length === 0) {
+      this.renderer.viewport.offsetX = this.canvas.clientWidth / 2;
+      this.renderer.viewport.offsetY = this.canvas.clientHeight / 2;
+      return;
+    }
+    const xs = elements.flatMap((element) => [element.x, element.x2]);
+    const ys = elements.flatMap((element) => [element.y, element.y2]);
+    const centerX = (Math.min(...xs) + Math.max(...xs)) / 2;
+    const centerY = (Math.min(...ys) + Math.max(...ys)) / 2;
+    this.renderer.viewport.offsetX = this.canvas.clientWidth / 2 - centerX * scale;
+    this.renderer.viewport.offsetY = this.canvas.clientHeight / 2 - centerY * scale;
+  }
+
   private setTool(tool: Tool): void {
+    if (this.editDisabled && tool !== "select") {
+      this.notifyEditingDisabled();
+      return;
+    }
     this.activeTool = tool;
     this.toolButtons.forEach((button) =>
       button.classList.toggle("active", button.dataset.tool === tool)
@@ -4666,6 +4735,37 @@ export class NativeCircuitApp {
           ? "模式：选择"
           : `模式：${COMPONENT_BY_ID.get(tool)?.label ?? tool}`;
     }
+  }
+
+  /** Keep Edit and Draw availability in sync with the legacy MenuBar. */
+  private syncEditMenuState(): void {
+    const selected = this.selectedIndices.size > 0;
+    const selectedElements = selected
+      ? [...this.selectedIndices]
+          .map((index) => this.runner.elements[index])
+          .filter((element): element is CircuitElm => element !== undefined)
+      : this.runner.elements;
+    // MouseManager evaluates the complete circuit when nothing is selected.
+    const canFlipX = selectedElements.every((element) => element.canFlipX());
+    const canFlipY = selectedElements.every((element) => element.canFlipY());
+    const canFlipXY = selectedElements.every((element) => element.canFlipXY());
+    const setDisabled = (action: string, disabled: boolean) => {
+      this.root
+        .querySelectorAll<HTMLButtonElement>(`[data-action="${action}"]`)
+        .forEach((button) => { button.disabled = disabled; });
+    };
+
+    setDisabled("undo", this.historyIndex <= 0);
+    setDisabled("redo", this.historyIndex >= this.history.length - 1);
+    setDisabled("cut", !selected);
+    setDisabled("copy", !selected);
+    setDisabled("paste", this.clipboard.length === 0);
+    setDisabled("duplicate", !selected);
+    setDisabled("delete", !selected);
+    setDisabled("select-all", this.runner.elements.length === 0);
+    setDisabled("flip-x", !canFlipX);
+    setDisabled("flip-y", !canFlipY);
+    setDisabled("flip-xy", !canFlipXY);
   }
 
   private onKeyDown(event: KeyboardEvent): void {
@@ -4744,6 +4844,11 @@ export class NativeCircuitApp {
     this.errorMessage =
       error instanceof Error ? error.message : String(error);
     console.error(error);
+  }
+
+  private notifyEditingDisabled(): void {
+    this.errorMessage = "Editing disabled. Re-enable it from the Options menu.";
+    this.updateStatus();
   }
 
   private canvasPosition(event: MouseEvent): { x: number; y: number } {
@@ -5023,7 +5128,7 @@ export class NativeCircuitApp {
             <hr>
             <button data-action="about">关于…</button>
           </div></details>
-          <details><summary>编辑</summary><div class="menu-popup">
+          <details data-menu="edit"><summary>编辑</summary><div class="menu-popup">
             <button data-action="undo">撤销 <kbd>Ctrl+Z</kbd></button>
             <button data-action="redo">重做 <kbd>Ctrl+Y</kbd></button>
             <hr>
@@ -5031,19 +5136,24 @@ export class NativeCircuitApp {
             <button data-action="copy">复制 <kbd>Ctrl+C</kbd></button>
             <button data-action="paste">粘贴 <kbd>Ctrl+V</kbd></button>
             <button data-action="duplicate">复制一份 <kbd>Ctrl+D</kbd></button>
-            <button data-action="delete">删除 <kbd>Delete</kbd></button>
+            <hr>
             <button data-action="select-all">全选 <kbd>Ctrl+A</kbd></button>
             <hr>
             <button data-action="search-component">查找元件… <kbd>/</kbd></button>
-            <button data-action="fit">居中并适合窗口</button>
+            <button data-action="fit">居中电路</button>
             <button data-action="zoom-100">缩放 100% <kbd>0</kbd></button>
             <button data-action="zoom-in">放大 <kbd>+</kbd></button>
             <button data-action="zoom-out">缩小 <kbd>-</kbd></button>
             <button data-action="flip-x">水平翻转</button>
             <button data-action="flip-y">垂直翻转</button>
             <button data-action="flip-xy">水平与垂直翻转</button>
+            <details class="edit-extension-menu"><summary>扩展功能 ›</summary>
+              <div class="edit-extension-popup">
+                <button data-action="delete">删除 <kbd>Delete</kbd></button>
+              </div>
+            </details>
           </div></details>
-          <details><summary>绘制</summary><div class="menu-popup component-menu">
+          <details data-menu="draw"><summary>绘制</summary><div class="menu-popup component-menu">
             ${NativeCircuitApp.componentMenu()}
           </div></details>
           <details><summary>示波器</summary><div class="menu-popup scope-menu">

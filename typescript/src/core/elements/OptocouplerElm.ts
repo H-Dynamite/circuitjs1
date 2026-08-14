@@ -122,6 +122,12 @@ export class OptocouplerElm extends CircuitElm {
     return Math.floor(first / 2) === Math.floor(second / 2);
   }
 
+  // The Java model allows independent X/Y flips but not an axis-exchange
+  // Flip XY: its four terminal roles would no longer preserve their layout.
+  public override canFlipXY(): boolean {
+    return false;
+  }
+
   public override dump(): string {
     return `${super.dump()} ${this.ctr}`;
   }

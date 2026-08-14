@@ -69,7 +69,7 @@ try {
 
   const editMenu = page.locator(".menu-bar > details").nth(1);
   await menu.evaluate((element) => { element.open = false; });
-  await editMenu.locator("summary").click();
+  await editMenu.locator(":scope > summary").click();
   await editMenu.locator('[data-action="undo"]').click();
   await openScopes();
   assert.deepEqual(panels(await state()), [0, 1], "Undo restores the persisted pre-stack positions");
