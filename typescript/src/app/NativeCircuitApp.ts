@@ -459,10 +459,6 @@ export class NativeCircuitApp {
     this.loadShortcuts();
     this.loadApplicationSettings();
     this.applyModificationSettings();
-    this.renderer.europeanResistors = this.getStoredOption(
-      "euro-resistors",
-      true
-    );
     this.canvas = this.requireElement("circuit-canvas", HTMLCanvasElement);
     this.scopeCanvas = this.requireElement(
       "scope-canvas",
@@ -571,11 +567,18 @@ export class NativeCircuitApp {
     fit = true,
     recordHistory = true
   ): void {
+    const loader = new CircuitLoader();
+    const circuitDocument = loader.readCircuit(source);
     const nextRunner = source.trimStart().startsWith("<")
       ? CircuitRunner.fromXml(source)
       : CircuitRunner.fromText(source);
     nextRunner.analyzeCircuit();
     this.runner = nextRunner;
+    this.applyCircuitDisplayFlags(
+      circuitDocument.format === "text"
+        ? circuitDocument.flags
+        : loader.readCircuitFlags(circuitDocument.options.flags)
+    );
     this.selectedIndex = null;
     this.selectedIndices.clear();
     this.draft = null;
@@ -959,6 +962,9 @@ export class NativeCircuitApp {
     this.root
       .querySelector<HTMLButtonElement>("#options-reset-colors")
       ?.addEventListener("click", () => this.resetOptionColors());
+    this.root
+      .querySelector<HTMLButtonElement>("#open-modification-setup")
+      ?.addEventListener("click", () => this.openModificationFromOptions());
     this.root
       .querySelector<HTMLButtonElement>("#modification-apply")
       ?.addEventListener("click", () => this.applyModificationDialog());
@@ -1987,13 +1993,22 @@ export class NativeCircuitApp {
         break;
       case "toggle-iec-gates":
         this.renderer.iecGates = !this.renderer.iecGates;
+        this.setStoredOption("iec-gates", this.renderer.iecGates);
         break;
       case "toggle-white-background":
         this.renderer.whiteBackground = !this.renderer.whiteBackground;
+        this.setStoredOption(
+          "white-background",
+          this.renderer.whiteBackground
+        );
         break;
       case "toggle-current-convention":
         this.renderer.conventionalCurrent =
           !this.renderer.conventionalCurrent;
+        this.setStoredOption(
+          "conventional-current",
+          this.renderer.conventionalCurrent
+        );
         break;
       case "toggle-disable-editing":
         this.editDisabled = !this.editDisabled;
@@ -2001,6 +2016,7 @@ export class NativeCircuitApp {
         break;
       case "toggle-wheel-edit":
         this.mouseWheelEdit = !this.mouseWheelEdit;
+        this.setStoredOption("mouse-wheel-edit", this.mouseWheelEdit);
         break;
       default:
         break;
@@ -2598,6 +2614,21 @@ export class NativeCircuitApp {
       20
     );
     this.autoDcOnReset = this.getStoredOption("auto-dc-on-reset");
+    // These are application preferences in CircuitJS1 (rather than circuit
+    // file flags), so they must survive a browser restart.  Keep the legacy
+    // defaults: European resistor symbols, conventional current motion and
+    // mouse-wheel value editing start enabled.
+    this.renderer.europeanResistors = this.getStoredOption(
+      "euro-resistors",
+      true
+    );
+    this.renderer.iecGates = this.getStoredOption("iec-gates");
+    this.renderer.whiteBackground = this.getStoredOption("white-background");
+    this.renderer.conventionalCurrent = this.getStoredOption(
+      "conventional-current",
+      true
+    );
+    this.mouseWheelEdit = this.getStoredOption("mouse-wheel-edit", true);
     this.renderer.positiveColor =
       localStorage.getItem("circuitjs1-ts-positive-color") ?? "#20ff40";
     this.renderer.negativeColor =
@@ -2649,6 +2680,27 @@ export class NativeCircuitApp {
       solver.value = String(this.runner.simulation.solverType);
     }
     this.requireElement("options-dialog", HTMLDialogElement).showModal();
+  }
+
+  /** Apply the five display flags encoded by CircuitLoader's `$` / `<cir f>`
+   * record.  They belong to the circuit, so loading Undo history or a shared
+   * circuit must restore them rather than retaining the preceding page state.
+   */
+  private applyCircuitDisplayFlags(flags: {
+    showCurrentDots: boolean;
+    smallGrid: boolean;
+    showVoltage: boolean;
+    showPower: boolean;
+    showValues: boolean;
+    autoDCOnReset: boolean;
+  }): void {
+    this.renderer.showCurrent = flags.showCurrentDots;
+    this.renderer.smallGrid = flags.smallGrid;
+    this.gridSize = flags.smallGrid ? 8 : 16;
+    this.renderer.showVoltage = flags.showVoltage;
+    this.renderer.showPower = flags.showPower;
+    this.renderer.showValues = flags.showValues;
+    this.autoDcOnReset = flags.autoDCOnReset;
   }
 
   private applyOptionsDialog(): void {
@@ -2761,6 +2813,7 @@ export class NativeCircuitApp {
     setValue("mod-run-icon", read("run-icon", "text"));
     setValue("mod-sidebar-duration", read("sidebar-duration", "200"));
     setValue("mod-sidebar-curve", read("sidebar-curve", "ease"));
+    setChecked("mod-show-mode", this.getStoredOption("show-mode", true));
     setChecked("mod-hide-buttons", read("hide-buttons", "false") === "true");
     setChecked(
       "mod-overlay-sidebar",
@@ -2812,12 +2865,21 @@ export class NativeCircuitApp {
     store("sidebar-curve", value("mod-sidebar-curve"));
     store("show-sidebar", checked("mod-show-sidebar"));
     store("pause-unfocused", checked("mod-pause-unfocused"));
+    this.setStoredOption("show-mode", checked("mod-show-mode"));
     this.applyModificationSettings(false);
     this.requireElement(
       "modification-dialog",
       HTMLDialogElement
     ).close();
     requestAnimationFrame(() => this.resizeCanvases());
+  }
+
+  private openModificationFromOptions(): void {
+    // Modification Setup is a TS-only extension.  It deliberately lives one
+    // level below legacy "Other Options...", leaving the Options menu's main
+    // command path and ordering identical to CircuitJS1.
+    this.requireElement("options-dialog", HTMLDialogElement).close();
+    this.openModificationDialog();
   }
 
   private applyModificationSettings(
@@ -2860,6 +2922,9 @@ export class NativeCircuitApp {
     );
     this.pauseWhenUnfocused =
       read("pause-unfocused", "false") === "true";
+    this.root
+      .querySelector<HTMLElement>("#tool-mode-label")
+      ?.classList.toggle("hidden", !this.getStoredOption("show-mode", true));
     if (
       applyStartupVisibility &&
       read("show-sidebar", "true") !== "true"
@@ -3529,8 +3594,16 @@ export class NativeCircuitApp {
     if (this.runner.sourceFormat === "xml") {
       return this.serializeXmlCircuit();
     }
+    const flags =
+      (this.renderer.showCurrent ? 1 : 0) |
+      (this.renderer.smallGrid ? 2 : 0) |
+      (this.renderer.showVoltage ? 0 : 4) |
+      (this.renderer.showPower ? 8 : 0) |
+      (this.renderer.showValues ? 0 : 16) |
+      (this.runner.simulation.adjustTimeStep ? 64 : 0) |
+      (this.autoDcOnReset ? 128 : 0);
     const options =
-      `$ ${1 | (this.runner.simulation.adjustTimeStep ? 64 : 0)} ` +
+      `$ ${flags} ` +
       `${this.runner.simulation.maxTimeStep} 10.2 50 ` +
       `${CircuitElm.voltageRange} 43 ${this.runner.simulation.minTimeStep}`;
     const modelRecords = this.runner.preservedTextRecords.filter(
@@ -3573,7 +3646,15 @@ export class NativeCircuitApp {
     const root = document.documentElement;
     root.setAttribute(
       "f",
-      String(this.runner.simulation.adjustTimeStep ? 64 : 0)
+      String(
+        (this.renderer.showCurrent ? 1 : 0) |
+          (this.renderer.smallGrid ? 2 : 0) |
+          (this.renderer.showVoltage ? 0 : 4) |
+          (this.renderer.showPower ? 8 : 0) |
+          (this.renderer.showValues ? 0 : 16) |
+          (this.runner.simulation.adjustTimeStep ? 64 : 0) |
+          (this.autoDcOnReset ? 128 : 0)
+      )
     );
     root.setAttribute(
       "ts",
@@ -5319,23 +5400,21 @@ export class NativeCircuitApp {
             </details>
           </div></details>
           <details><summary>选项</summary><div class="menu-popup option-menu">
-            <button data-action="toggle-current">显示电流动画</button>
-            <button data-action="toggle-voltage">显示电压颜色</button>
-            <button data-action="toggle-power">显示功率颜色</button>
-            <button data-action="toggle-values">显示元件数值</button>
+            <button data-action="toggle-current">显示电流</button>
+            <button data-action="toggle-voltage">显示电压</button>
+            <button data-action="toggle-power">显示功率</button>
+            <button data-action="toggle-values">显示数值</button>
             <button data-action="toggle-small-grid">小网格</button>
             <button data-action="toggle-toolbar">工具栏</button>
-            <button data-action="toggle-show-mode">Show Mode</button>
             <button data-action="toggle-crosshair">显示光标十字线</button>
             <button data-action="toggle-euro-resistor">欧洲电阻符号</button>
             <button data-action="toggle-iec-gates">IEC 逻辑门</button>
             <button data-action="toggle-white-background">白色背景</button>
-            <button data-action="toggle-current-convention">传统电流方向</button>
+            <button data-action="toggle-current-convention">常规电流运动</button>
             <button data-action="toggle-disable-editing">禁用编辑</button>
-            <button data-action="toggle-wheel-edit">滚轮编辑数值</button>
+            <button data-action="toggle-wheel-edit">使用鼠标滚轮编辑数值</button>
             <button data-action="shortcuts">快捷键...</button>
             <button data-action="other-options">其他选项...</button>
-            <button class="modification-setup" data-action="modification-setup">Modification Setup...</button>
           </div></details>
           <details data-menu="tools"><summary>工具</summary><div class="menu-popup">
             <button data-action="convert-wires">将导线转换为布线导线</button>
@@ -5600,6 +5679,7 @@ export class NativeCircuitApp {
             </fieldset>
           </div>
           <footer>
+            <button type="button" id="open-modification-setup">界面扩展设置…</button>
             <span class="footer-spacer"></span>
             <button type="button" data-dialog-close>取消</button>
             <button type="button" id="options-apply" class="primary">应用</button>
@@ -5627,6 +5707,10 @@ export class NativeCircuitApp {
                   <option value="standard">标准</option>
                   <option value="small">紧凑</option>
                 </select>
+              </label>
+              <label class="check-row">
+                <input id="mod-show-mode" type="checkbox">
+                显示工具模式标签
               </label>
             </fieldset>
             <fieldset>

@@ -1,7 +1,12 @@
 import { readFileSync } from "node:fs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NativeCircuitApp } from "../src/app/NativeCircuitApp";
-import { CircuitRunner, CustomCompositeElm, VoltageElm } from "../src/core";
+import {
+  CircuitElm,
+  CircuitRunner,
+  CustomCompositeElm,
+  VoltageElm
+} from "../src/core";
 
 describe("options menu functionality", () => {
   beforeEach(() => {
@@ -14,6 +19,151 @@ describe("options menu functionality", () => {
     HTMLDialogElement.prototype.close = function close() {
       this.removeAttribute("open");
     };
+  });
+
+  it("keeps the legacy Options command path, circuit flags, and stored preferences", () => {
+    const root = document.querySelector<HTMLElement>("#app");
+    expect(root).not.toBeNull();
+    const app = new NativeCircuitApp(root!);
+    const actions = [...root!.querySelectorAll<HTMLButtonElement>(
+      '.menu-bar > details > .option-menu > button'
+    )].map((button) => button.dataset.action);
+    expect(actions).toEqual([
+      "toggle-current",
+      "toggle-voltage",
+      "toggle-power",
+      "toggle-values",
+      "toggle-small-grid",
+      "toggle-toolbar",
+      "toggle-crosshair",
+      "toggle-euro-resistor",
+      "toggle-iec-gates",
+      "toggle-white-background",
+      "toggle-current-convention",
+      "toggle-disable-editing",
+      "toggle-wheel-edit",
+      "shortcuts",
+      "other-options"
+    ]);
+    expect(actions).not.toContain("toggle-show-mode");
+    expect(actions).not.toContain("modification-setup");
+    expect(
+      root!.querySelector('[data-action="subcircuits"]')
+        ?.closest('details')?.dataset.menu
+    ).toBe("tools");
+
+    const action = (name: string) =>
+      root!.querySelector<HTMLButtonElement>(`[data-action="${name}"]`)!;
+    action("toggle-power").click();
+    expect(action("toggle-power").getAttribute("aria-pressed")).toBe("true");
+    expect(action("toggle-voltage").getAttribute("aria-pressed")).toBe("false");
+    expect(app.api.exportCircuit()).toMatch(/^\$ 13 /);
+    action("toggle-voltage").click();
+    expect(action("toggle-voltage").getAttribute("aria-pressed")).toBe("true");
+    expect(action("toggle-power").getAttribute("aria-pressed")).toBe("false");
+    expect(app.api.exportCircuit()).toMatch(/^\$ 1 /);
+
+    app.api.loadCircuit("$ 30 0.000005 10.2 50 5 43 5e-11");
+    expect(action("toggle-current").getAttribute("aria-pressed")).toBe("false");
+    expect(action("toggle-small-grid").getAttribute("aria-pressed")).toBe("true");
+    expect(action("toggle-voltage").getAttribute("aria-pressed")).toBe("false");
+    expect(action("toggle-power").getAttribute("aria-pressed")).toBe("true");
+    expect(action("toggle-values").getAttribute("aria-pressed")).toBe("false");
+
+    for (const name of [
+      "toggle-iec-gates",
+      "toggle-white-background",
+      "toggle-current-convention",
+      "toggle-wheel-edit"
+    ]) {
+      action(name).click();
+    }
+    const reloadedRoot = document.createElement("div");
+    document.body.append(reloadedRoot);
+    const reloaded = new NativeCircuitApp(reloadedRoot);
+    expect(
+      reloadedRoot
+        .querySelector<HTMLButtonElement>('[data-action="toggle-iec-gates"]')
+        ?.getAttribute("aria-pressed")
+    ).toBe("true");
+    expect(
+      reloadedRoot
+        .querySelector<HTMLButtonElement>('[data-action="toggle-white-background"]')
+        ?.getAttribute("aria-pressed")
+    ).toBe("true");
+    expect(
+      reloadedRoot
+        .querySelector<HTMLButtonElement>('[data-action="toggle-current-convention"]')
+        ?.getAttribute("aria-pressed")
+    ).toBe("false");
+    expect(
+      reloadedRoot
+        .querySelector<HTMLButtonElement>('[data-action="toggle-wheel-edit"]')
+        ?.getAttribute("aria-pressed")
+    ).toBe("false");
+    // Keep the object alive so the test covers an actual app reload, not a
+    // hand-written DOM state.
+    expect(reloaded.api.getElements().length).toBeGreaterThan(0);
+  });
+
+  it("round-trips every legacy display flag and voltage range through text and XML", () => {
+    const root = document.querySelector<HTMLElement>("#app")!;
+    const app = new NativeCircuitApp(root);
+    const flagsToCheck = [1, 2, 4, 8, 16, 128, 159];
+    const action = (target: HTMLElement, name: string) =>
+      target.querySelector<HTMLButtonElement>(`[data-action="${name}"]`)!;
+    const expectFlags = (target: HTMLElement, flags: number) => {
+      expect(action(target, "toggle-current").getAttribute("aria-pressed")).toBe(
+        String((flags & 1) !== 0)
+      );
+      expect(action(target, "toggle-small-grid").getAttribute("aria-pressed")).toBe(
+        String((flags & 2) !== 0)
+      );
+      expect(action(target, "toggle-voltage").getAttribute("aria-pressed")).toBe(
+        String((flags & 4) === 0)
+      );
+      expect(action(target, "toggle-power").getAttribute("aria-pressed")).toBe(
+        String((flags & 8) !== 0)
+      );
+      expect(action(target, "toggle-values").getAttribute("aria-pressed")).toBe(
+        String((flags & 16) === 0)
+      );
+    };
+
+    // Direct core coverage ensures CircuitRunner.fromText itself applies `$`
+    // voltageRange before NativeCircuitApp has a chance to render anything.
+    CircuitRunner.fromText("$ 1 0.000005 10.2 50 17.5 43 5e-11");
+    expect(CircuitElm.voltageRange).toBe(17.5);
+
+    for (const flags of flagsToCheck) {
+      const text = `$ ${flags} 0.000005 10.2 50 17.5 43 5e-11`;
+      app.api.loadCircuit(text);
+      expectFlags(root, flags);
+      const textExport = app.api.exportCircuit();
+      expect(textExport).toMatch(new RegExp(`^\\$ ${flags} 0\\.000005 10\\.2 50 17\\.5 43 5e-11$`));
+
+      const textReloadRoot = document.createElement("div");
+      document.body.append(textReloadRoot);
+      const textReload = new NativeCircuitApp(textReloadRoot);
+      textReload.api.loadCircuit(textExport);
+      expectFlags(textReloadRoot, flags);
+      expect(textReload.api.exportCircuit()).toBe(textExport);
+
+      const xml = `<cir f="${flags}" ts="0.000005" mts="5e-11" vr="17.5"/>`;
+      app.api.loadCircuit(xml);
+      expectFlags(root, flags);
+      const xmlExport = app.api.exportCircuit();
+      expect(xmlExport).toContain(`f="${flags}"`);
+      expect(xmlExport).toContain('vr="17.5"');
+
+      const xmlReloadRoot = document.createElement("div");
+      document.body.append(xmlReloadRoot);
+      const xmlReload = new NativeCircuitApp(xmlReloadRoot);
+      xmlReload.api.loadCircuit(xmlExport);
+      expectFlags(xmlReloadRoot, flags);
+      expect(xmlReload.api.exportCircuit()).toContain(`f="${flags}"`);
+      expect(xmlReload.api.exportCircuit()).toContain('vr="17.5"');
+    }
   });
 
   it("applies mode, shortcut, simulator, subcircuit and UI settings", () => {
@@ -37,13 +187,6 @@ describe("options menu functionality", () => {
       .find((element) => element instanceof VoltageElm);
     expect(defaultSource).toBeInstanceOf(VoltageElm);
     expect((defaultSource as VoltageElm).waveform).toBe(VoltageElm.WF_DC);
-
-    root!
-      .querySelector<HTMLButtonElement>('[data-action="toggle-show-mode"]')
-      ?.click();
-    expect(
-      root!.querySelector("#tool-mode-label")?.classList.contains("hidden")
-    ).toBe(true);
 
     root!
       .querySelector<HTMLButtonElement>('[data-action="shortcuts"]')
@@ -76,14 +219,16 @@ describe("options menu functionality", () => {
     expect(app.api.exportCircuit()).toMatch(/^\$ 1 0\.00001 /);
 
     root!
-      .querySelector<HTMLButtonElement>(
-        '[data-action="modification-setup"]'
-      )
+      .querySelector<HTMLButtonElement>('[data-action="other-options"]')
+      ?.click();
+    root!
+      .querySelector<HTMLButtonElement>("#open-modification-setup")
       ?.click();
     root!.querySelector<HTMLSelectElement>("#mod-menu-size")!.value =
       "small";
     root!.querySelector<HTMLInputElement>("#mod-hide-buttons")!.checked =
       true;
+    root!.querySelector<HTMLInputElement>("#mod-show-mode")!.checked = false;
     root!
       .querySelector<HTMLButtonElement>("#modification-apply")
       ?.click();
@@ -94,6 +239,9 @@ describe("options menu functionality", () => {
       root!
         .querySelector(".native-app")
         ?.classList.contains("hide-run-buttons")
+    ).toBe(true);
+    expect(
+      root!.querySelector("#tool-mode-label")?.classList.contains("hidden")
     ).toBe(true);
 
     app.api.loadCircuit(

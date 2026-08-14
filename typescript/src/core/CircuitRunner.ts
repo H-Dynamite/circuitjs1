@@ -135,6 +135,10 @@ export class CircuitRunner {
       simulation.maxTimeStep = document.options.maxTimeStep;
       simulation.minTimeStep =
         document.options.minTimeStep ?? simulation.minTimeStep;
+      // The legacy CircuitLoader applies the `$` record's voltage range
+      // before elements are analyzed.  It is circuit state, not merely a UI
+      // preference, and must survive text import/export just as XML `vr` does.
+      CircuitElm.voltageRange = document.options.voltageRange;
       simulation.adjustTimeStep = document.flags.adjustTimeStep;
     }
 
