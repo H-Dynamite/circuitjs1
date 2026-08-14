@@ -1,5 +1,7 @@
-import localeZhSource from "../public/legacy/circuitjs1/locale_zh.txt?raw";
-import setupListSource from "../public/legacy/circuitjs1/setuplist.txt?raw";
+// Keep these small source manifests with the native port. The GWT baseline is
+// deliberately excluded from TS-only releases, so this data stays self-contained.
+import localeZhSource from "./examples/metadata/locale_zh.txt?raw";
+import setupListSource from "./examples/metadata/setuplist.txt?raw";
 
 const modules = import.meta.glob("./examples/circuits/*.txt", {
   eager: true,
@@ -15,7 +17,11 @@ export interface CircuitExample {
   source: string;
 }
 
+/** One physical line in the original setuplist menu. Duplicate source ids are intentional. */
+export interface CircuitMenuEntry extends CircuitExample {}
+
 interface CircuitMenuMetadata {
+  id: string;
   name: string;
   categoryPath: string[];
   order: number;
@@ -56,8 +62,8 @@ export function parseLocale(source: string): Map<string, string> {
 export function parseCircuitMenu(
   source: string,
   locale: ReadonlyMap<string, string>
-): Map<string, CircuitMenuMetadata> {
-  const metadata = new Map<string, CircuitMenuMetadata>();
+): CircuitMenuMetadata[] {
+  const metadata: CircuitMenuMetadata[] = [];
   const categoryPath: string[] = [];
   let order = 0;
   const translate = (value: string) => locale.get(value) ?? value;
@@ -76,7 +82,8 @@ export function parseCircuitMenu(
 
     const match = line.match(/^>?(\S+\.txt)\s+(.+)$/);
     if (match === null) continue;
-    metadata.set(match[1], {
+    metadata.push({
+      id: match[1],
       name: translate(match[2].trim()),
       categoryPath: [...categoryPath],
       order
@@ -91,10 +98,50 @@ const originalMenu = parseCircuitMenu(
   parseLocale(localeZhSource)
 );
 
+const sourcesById = new Map<string, string>(
+  Object.entries(modules).map(([path, source]) => [
+    path.split("/").pop() ?? path,
+    source
+  ])
+);
+
+const missingMenuSources = originalMenu
+  .filter((entry) => !sourcesById.has(entry.id))
+  .map((entry) => entry.id);
+if (missingMenuSources.length > 0) {
+  throw new Error(
+    `Circuit menu references missing sources: ${missingMenuSources.join(", ")}`
+  );
+}
+
+/**
+ * Faithful projection of setuplist.txt. It is deliberately separate from the
+ * complete source-file catalog: cmosinverter appears twice in the original
+ * menu and seven TS-loadable files are not menu entries at all.
+ */
+export const circuitMenuEntries: CircuitMenuEntry[] = originalMenu.map(
+  (entry) => ({
+    ...entry,
+    source: sourcesById.get(entry.id)!
+  })
+);
+
+const firstMenuEntryById = new Map<string, CircuitMenuMetadata>();
+for (const entry of originalMenu) {
+  if (!firstMenuEntryById.has(entry.id)) {
+    firstMenuEntryById.set(entry.id, entry);
+  }
+}
+
+/**
+ * Complete loadable source catalog. Entries outside setuplist.txt remain
+ * available to tests and direct loading, but are never inserted into the
+ * legacy-equivalent Circuit menu.
+ */
 export const circuitExamples: CircuitExample[] = Object.entries(modules)
   .map(([path, source]) => {
     const id = path.split("/").pop() ?? path;
-    const original = originalMenu.get(id);
+    const original = firstMenuEntryById.get(id);
     const fallback = id
       .replace(/\.txt$/i, "")
       .replace(/[-_]+/g, " ");

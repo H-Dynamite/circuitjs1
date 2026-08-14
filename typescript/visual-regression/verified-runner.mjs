@@ -13,7 +13,7 @@ const MENUS = [
   ["file", "\u6587\u4ef6", "\u6587\u4ef6", "new"], ["edit", "\u7f16\u8f91", "\u7f16\u8f91", "undo"],
   ["draw", "\u7ed8\u5236", "\u7ed8\u5236", "tool"], ["scopes", "\u793a\u6ce2\u5668", "\u793a\u6ce2\u5668", "scope-reset"],
   ["options", "\u9009\u9879", "\u9009\u9879", "toggle-current"], ["tools", "\u5de5\u5177", "\u5de5\u5177", "reset"],
-  ["circuits", "\u7535\u8def", "\u7535\u8def", "examples"]
+  ["circuits", "\u7535\u8def", "\u7535\u8def", "circuit-first"]
 ];
 const sha = (value) => createHash("sha256").update(value).digest("hex");
 const nameFor = (id) => id.split("/").map((part) => part.replace(/[^a-zA-Z0-9._-]/g, "_")).join(sep);
@@ -206,6 +206,31 @@ async function tsLoad(page, baseUrl, source) {
   if (!visualLayoutStatus(visualLayout)) throw new Error(`Invalid TypeScript visual layout: ${JSON.stringify(visualLayout)}`);
   return { inputSha256: sha(source), expectedElementCount, ...summary, exportedSha256: sha(exportedCircuit), paused: true, canvas, visualLayout };
 }
+async function popupGeometry(locator, label) {
+  const box = await locator.boundingBox();
+  if (box === null) throw new Error(`${label} popup has no rendered box`);
+  return { x: box.x, y: box.y, width: box.width, height: box.height };
+}
+export function filePopupMetric(box) {
+  const target = { x: 0, y: 30, width: 197, height: 345 };
+  const tolerance = { x: 1, y: 1, width: 2, height: 2 };
+  const delta = Object.fromEntries(Object.keys(target).map((key) => [key, box[key] - target[key]]));
+  return { target, tolerance, actual: box, delta, passed: Object.keys(target).every((key) => Math.abs(delta[key]) <= tolerance[key]) };
+}
+export function applyFilePopupMetric(result, box) {
+  result.filePopupMetric = filePopupMetric(box);
+  if (!result.filePopupMetric.passed) {
+    result.status = "failed";
+    result.error = `TS File popup geometry outside acceptance: ${JSON.stringify(result.filePopupMetric)}`;
+  }
+}
+// Capture/infrastructure failures are terminal.  A later comparison may add
+// diagnostics, but must never relabel a failed capture as review/invalid.
+export function applyVisualOutcome(result, baselineValid, visualReview) {
+  if (result.status === "failed") return;
+  if (!baselineValid) result.status = "invalid-baseline";
+  else if (visualReview) result.status = "review";
+}
 async function verifyMenu(page, app, entry, index) {
   const [id, legacyText, tsText, key] = entry;
   if (app === "ts") {
@@ -221,14 +246,23 @@ async function verifyMenu(page, app, entry, index) {
     // 30 seconds retrying. This exercises the same browser toggle event.
     await summaries.nth(index).evaluate((summary) => summary.click()); const menu = page.locator(".menu-bar > details").nth(index);
     if (await menu.getAttribute("open") === null) throw new Error(`TS ${id} menu did not open`);
-    const item = key === "tool" ? menu.locator("[data-tool]").first() : menu.locator(`[data-action="${key}"]`);
-    await item.waitFor({ state: "visible", timeout: 10_000 }); return { labels: texts, keyItem: (await item.textContent())?.trim() ?? "" };
+    const item = key === "tool"
+      ? menu.locator("[data-tool]").first()
+      : key === "circuit-first"
+        ? menu.locator(".menu-popup > .component-submenu > .component-submenu-label").first()
+        : menu.locator(`[data-action="${key}"]`);
+    await item.waitFor({ state: "visible", timeout: 10_000 });
+    const keyItem = (await item.textContent())?.trim() ?? "";
+    if (key === "circuit-first" && keyItem !== "基础知识") {
+      throw new Error(`TS circuit menu first entry mismatch: ${JSON.stringify(keyItem)}`);
+    }
+    return { labels: texts, keyItem, popup: await popupGeometry(menu.locator(".menu-popup"), `TS ${id}`) };
   }
   const menus = page.locator(".gwt-MenuBar-horizontal .gwt-MenuItem"), texts = (await menus.allTextContents()).map((text) => text.trim());
   if (texts.length < MENUS.length || texts[index] !== legacyText) throw new Error(`Legacy menu order/text mismatch: ${JSON.stringify(texts)}`);
   await menus.nth(index).click(); const popup = page.locator(".gwt-MenuBarPopup:visible, .gwt-PopupPanel:visible").filter({ has: page.locator(".gwt-MenuItem") }).last();
   await popup.waitFor({ state: "visible", timeout: 10_000 }); const keyItem = (await popup.locator(".gwt-MenuItem").first().textContent())?.trim() ?? "";
-  if (!keyItem) throw new Error(`Legacy ${id} menu has no visible key item`); return { labels: texts, keyItem };
+  if (!keyItem) throw new Error(`Legacy ${id} menu has no visible key item`); return { labels: texts, keyItem, popup: await popupGeometry(popup, `Legacy ${id}`) };
 }
 async function diff(context, legacyPath, tsPath, outputPath, crop = undefined, offsets = undefined) {
   const [legacy, ts] = await Promise.all([readFile(legacyPath), readFile(tsPath)]), page = await context.newPage({ viewport: VIEWPORT });
@@ -296,10 +330,13 @@ export async function run() {
           await shot(menuLegacyPage,files.legacy);
           result.source.ts=await tsLoad(menuTsPage,baseUrl,firstSource);
           result.menu.ts=await verifyMenu(menuTsPage,"ts",entry,index);
+          if (entry[0] === "file") {
+            applyFilePopupMetric(result, result.menu.ts.popup);
+          }
           await shot(menuTsPage,files.ts);
           result.baseline=comparableLayout(result.source.legacy.visualLayout,result.source.ts.visualLayout);
-          if(!result.baseline.valid){result.status="invalid-baseline"}
-          else if(options.diff){result.metrics=await diff(context,files.legacy,files.ts,files.diff);result.regionMetrics=await diffRegions(context,files,result.source.legacy.visualLayout,result.source.ts.visualLayout);if(result.metrics.diffPixelRatio>REVIEW_DIFF_PIXEL_RATIO||result.metrics.mae>REVIEW_MAE)result.status="review"}
+          if(!result.baseline.valid){applyVisualOutcome(result, false, false)}
+          else if(options.diff){result.metrics=await diff(context,files.legacy,files.ts,files.diff);result.regionMetrics=await diffRegions(context,files,result.source.legacy.visualLayout,result.source.ts.visualLayout);applyVisualOutcome(result, true, result.metrics.diffPixelRatio>REVIEW_DIFF_PIXEL_RATIO||result.metrics.mae>REVIEW_MAE)}
         });
       } catch(error) { result.status="failed";result.captureStatus="failed";result.error=errorText(error) }
       finally { addMonitorFailures(result,[menuLegacyWatch,menuTsWatch]); await menuLegacyPage.close().catch(() => {}); await menuTsPage.close().catch(() => {}); }

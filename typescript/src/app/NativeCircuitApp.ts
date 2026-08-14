@@ -41,6 +41,7 @@ import {
 } from "../core";
 import {
   circuitExamples,
+  circuitMenuEntries,
   type CircuitExample
 } from "../examples";
 import {
@@ -4812,7 +4813,7 @@ export class NativeCircuitApp {
       groups: new Map()
     };
 
-    for (const example of circuitExamples) {
+    for (const example of circuitMenuEntries) {
       let current = root;
       for (const label of example.categoryPath) {
         let group = current.groups.get(label);
@@ -5074,8 +5075,6 @@ export class NativeCircuitApp {
           </div></details>
           <details><summary>电路</summary><div class="menu-popup component-menu example-menu">
             ${NativeCircuitApp.circuitExamplesMenu()}
-            <hr>
-            <button data-action="examples">全部 ${circuitExamples.length} 个示例…</button>
           </div></details>
         </nav>
 

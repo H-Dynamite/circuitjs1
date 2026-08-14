@@ -213,6 +213,25 @@ try {
   await run.click();
   assert.equal(await run.innerHTML(), "<strong>RUN</strong>&nbsp;/&nbsp;Stop", "running run label");
   assert.equal(await run.evaluate((element) => element.classList.contains("topButton")), true, "running button style");
+
+  // Use a real summary click.  The native popup must start below the title
+  // (rather than covering it) and retain the compact GWT File MenuBar row
+  // geometry at the 3-cgand desktop baseline.
+  const fileMenu = page.locator(".menu-bar > details").first();
+  await fileMenu.evaluate((element) => { element.open = false; });
+  const fileSummary = fileMenu.locator("summary");
+  await fileSummary.click();
+  assert.equal(await fileMenu.getAttribute("open"), "", "File menu opens through its visible summary");
+  const filePopup = await fileMenu.locator(".menu-popup").evaluate((element) => {
+    const box = element.getBoundingClientRect();
+    const summary = element.parentElement?.querySelector("summary")?.getBoundingClientRect();
+    return { x: box.x, y: box.y, width: box.width, height: box.height, summaryBottom: summary?.bottom };
+  });
+  approximately(filePopup.x, 0, "File popup x");
+  approximately(filePopup.y, 30, "File popup y");
+  approximately(filePopup.width, 197, "File popup width");
+  approximately(filePopup.height, 345, "File popup height");
+  assert.equal(filePopup.y >= (filePopup.summaryBottom ?? Infinity), true, "File popup does not cover its summary");
   console.log(`Top chrome browser layout: ${CASES.map((testCase) => testCase.id).join(", ")} passed.`);
 } finally {
   await browser.close();

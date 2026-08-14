@@ -98,9 +98,10 @@ button {
 
 .menu-popup {
   position: absolute;
-  /* details' popup static position already follows its summary.  Keeping
-   * this at zero prevents the menu height from being applied twice. */
-  top: 1px;
+  /* A native <details> is the positioning parent.  Anchor every first-level
+   * popup below its summary; using a one-pixel top value puts the popup back
+   * over the menu title and is unlike GWT's PopupPanel. */
+  top: calc(100% + 1px);
   left: 0;
   min-width: 150px;
   padding: 4px;
@@ -206,6 +207,26 @@ button {
   text-align: left;
   white-space: nowrap;
   cursor: pointer;
+}
+
+/* The legacy File menu is a vertical GWT MenuBar: 16 fixed-height rows and
+ * three compact separators.  Keep that box model local to File so the
+ * component and scope menus retain their own layouts. */
+.menu-bar > details:first-child > .menu-popup {
+  left: -1px;
+  width: 197px;
+  min-width: 197px;
+  padding: 1px 0;
+}
+
+.menu-bar > details:first-child > .menu-popup > button {
+  height: 20px;
+  padding: 2px 6px;
+  line-height: 16px;
+}
+
+.menu-bar > details:first-child > .menu-popup > hr {
+  margin: 3px 5px;
 }
 
 .menu-popup button[aria-pressed] {
@@ -584,7 +605,7 @@ button {
 }
 
 .compact-menu .menu-popup {
-  top: 1px;
+  top: calc(100% + 1px);
 }
 
 .compact-menu .sidebar-toggle {
