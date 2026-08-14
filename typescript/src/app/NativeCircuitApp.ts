@@ -2939,8 +2939,8 @@ export class NativeCircuitApp {
     // Keep the native simulator state, but render the same two-state control
     // that UIManager.setSimRunning() exposes in the GWT baseline.
     this.runButton.innerHTML = this.running
-      ? "<strong>RUN</strong>&nbsp;/&nbsp;Stop"
-      : "Run&nbsp;/&nbsp;<strong>STOP</strong>";
+      ? "<strong>运行</strong>&nbsp;/&nbsp;停止"
+      : "运行&nbsp;/&nbsp;<strong>停止</strong>";
     this.runButton.title = this.running ? "暂停仿真" : "继续仿真";
     this.runButton.classList.toggle("topButton-red", !this.running);
     this.runButton.classList.toggle("topButton", this.running);
@@ -5443,8 +5443,8 @@ export class NativeCircuitApp {
 
           <aside class="control-panel">
             <div class="run-row">
-              <button data-action="reset" class="topButton">Reset</button>
-              <button id="run-toggle" data-action="run" class="topButton"><strong>RUN</strong>&nbsp;/&nbsp;Stop</button>
+              <button data-action="reset" class="topButton">重置</button>
+              <button id="run-toggle" data-action="run" class="topButton"><strong>运行</strong>&nbsp;/&nbsp;停止</button>
             </div>
             <label>仿真速度
               <input data-control="simulation-speed" type="range" min="0" max="84" value="55">

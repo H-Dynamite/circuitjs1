@@ -203,16 +203,51 @@ try {
   assert.equal(await modeText(), "模式：电阻", "resistor mode label");
 
   const run = page.locator("#run-toggle");
+  const reset = page.locator('.run-row [data-action="reset"]');
   // Tool variants are intentionally hover-revealed, just like Toolbar.java.
   // Move to the actual control panel so the palette cannot cover the Run
   // button before asserting a real user click.
   await page.mouse.move(1270, 880);
   await page.evaluate(() => window.CircuitJS1TS.setRunning(false));
-  assert.equal(await run.innerHTML(), "Run&nbsp;/&nbsp;<strong>STOP</strong>", "stopped run label");
+  assert.equal(await run.innerHTML(), "运行&nbsp;/&nbsp;<strong>停止</strong>", "stopped run label");
   assert.equal(await run.evaluate((element) => element.classList.contains("topButton-red")), true, "stopped run color");
+  const stoppedControl = await page.evaluate(() => {
+    const element = document.querySelector("#run-toggle");
+    if (!(element instanceof HTMLButtonElement)) throw new Error("Missing Run/Stop control");
+    const box = element.getBoundingClientRect();
+    const style = getComputedStyle(element);
+    return { x: box.x, y: box.y, width: box.width, height: box.height, color: style.color, background: style.backgroundColor, font: style.font, padding: style.padding, margin: style.margin, boxSizing: style.boxSizing };
+  });
+  approximately(stoppedControl.x, 1166, "stopped Run/Stop x");
+  approximately(stoppedControl.y, 35, "stopped Run/Stop y");
+  approximately(stoppedControl.width, 78.84375, "stopped Run/Stop width");
+  assert.equal(stoppedControl.height, 30, "stopped Run/Stop height");
+  assert.equal(stoppedControl.background, "rgb(255, 0, 0)", "stopped Run/Stop red background");
+  assert.equal(stoppedControl.color, "rgb(255, 255, 255)", "stopped Run/Stop white text");
+  assert.equal(stoppedControl.font, '13px "Arial Unicode MS", Arial, sans-serif', "stopped Run/Stop font");
+  assert.equal(stoppedControl.padding, "5px 7px", "stopped Run/Stop padding");
+  assert.equal(stoppedControl.margin, "5px 0px 5px 5px", "stopped Run/Stop margin");
+  assert.equal(stoppedControl.boxSizing, "border-box", "stopped Run/Stop box model");
   await run.click();
-  assert.equal(await run.innerHTML(), "<strong>RUN</strong>&nbsp;/&nbsp;Stop", "running run label");
+  assert.equal(await run.innerHTML(), "<strong>运行</strong>&nbsp;/&nbsp;停止", "running run label");
   assert.equal(await run.evaluate((element) => element.classList.contains("topButton")), true, "running button style");
+  const runningControls = await page.evaluate(() => Array.from(document.querySelectorAll(".run-row button"), (element) => {
+    const box = element.getBoundingClientRect();
+    const style = getComputedStyle(element);
+    return { text: element.textContent, x: box.x, y: box.y, width: box.width, height: box.height, color: style.color, background: style.backgroundColor, font: style.font, padding: style.padding, margin: style.margin, boxSizing: style.boxSizing };
+  }));
+  assert.deepEqual(runningControls, [
+    { text: "重置", x: 1119, y: 35, width: 42, height: 30, color: "rgb(0, 0, 0)", background: "rgb(231, 231, 231)", font: '13px "Arial Unicode MS", Arial, sans-serif', padding: "5px 7px", margin: "5px 0px 5px 5px", boxSizing: "border-box" },
+    { text: "运行 / 停止", x: 1166, y: 35, width: 78.84375, height: 30, color: "rgb(0, 0, 0)", background: "rgb(231, 231, 231)", font: '13px "Arial Unicode MS", Arial, sans-serif', padding: "5px 7px", margin: "5px 0px 5px 5px", boxSizing: "border-box" }
+  ], "legacy-equivalent running control geometry and style");
+  await page.evaluate(() => window.CircuitJS1TS.stepSimulation(4));
+  assert.ok((await page.evaluate(() => window.CircuitJS1TS.getDynamicSnapshot().time)) > 0, "simulation advances before reset");
+  await reset.click();
+  assert.deepEqual(
+    await page.evaluate(() => ({ time: window.CircuitJS1TS.getDynamicSnapshot().time, running: window.CircuitJS1TS.getDynamicSnapshot().running, resetFocused: document.activeElement === document.querySelector('.run-row [data-action="reset"]') })),
+    { time: 0, running: true, resetFocused: true },
+    "Reset is a visible, focused control that restores the running simulation"
+  );
 
   // Use a real summary click.  The native popup must start below the title
   // (rather than covering it) and retain the compact GWT File MenuBar row

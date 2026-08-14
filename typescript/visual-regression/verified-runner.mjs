@@ -8,6 +8,9 @@ const ROOT = process.cwd(), DEFAULT_OUTPUT = resolve(ROOT, "visual-regression", 
 const CIRCUITS = resolve(ROOT, "src", "examples", "circuits"), VIEWPORT = { width: 1280, height: 900 };
 const REVIEW_DIFF_PIXEL_RATIO = 0.01, REVIEW_MAE = 0.002;
 const MENU_STRIP_GATE_ID = "3-cgand.txt", MENU_STRIP_MAE = 0.03;
+// The two UIManager buttons live above the workspace: the ordinary `right`
+// crop begins at the canvas origin and therefore cannot prove their parity.
+const RUN_CONTROLS_GATE_ID = "3-cgand.txt", RUN_CONTROLS_MAE = 0.07;
 const MENU_CAPTURE_TIMEOUT_MS = 60_000;
 const MENUS = [
   ["file", "\u6587\u4ef6", "\u6587\u4ef6", "new"], ["edit", "\u7f16\u8f91", "\u7f16\u8f91", "undo"],
@@ -21,14 +24,15 @@ const errorText = (error) => error instanceof Error ? error.message : String(err
 const filesFor = (output, stem) => ({ legacy: join(output, "legacy", `${stem}.png`), ts: join(output, "ts", `${stem}.png`), diff: join(output, "diff", `${stem}.png`) });
 
 function optionsFrom(args) {
-  const result = { output: DEFAULT_OUTPUT, limit: undefined, only: undefined, keepOutput: false, diff: true, headed: false, strict: false, menuStripGate: false };
+  const result = { output: DEFAULT_OUTPUT, limit: undefined, only: undefined, keepOutput: false, diff: true, headed: false, strict: false, menuStripGate: false, runControlsGate: false };
   for (const arg of args) {
-    if (arg === "--help") { console.log("Options: --limit=N --only=id[,id] --output=PATH --headed --no-diff --keep-output --menu-strip-gate"); process.exit(0); }
+    if (arg === "--help") { console.log("Options: --limit=N --only=id[,id] --output=PATH --headed --no-diff --keep-output --menu-strip-gate --run-controls-gate"); process.exit(0); }
     if (arg === "--keep-output") result.keepOutput = true;
     else if (arg === "--strict") result.strict = true;
     else if (arg === "--no-diff") result.diff = false;
     else if (arg === "--headed") result.headed = true;
     else if (arg === "--menu-strip-gate") result.menuStripGate = true;
+    else if (arg === "--run-controls-gate") result.runControlsGate = true;
     else if (arg.startsWith("--output=")) result.output = resolve(ROOT, arg.slice(9));
     else if (arg.startsWith("--limit=")) { result.limit = Number(arg.slice(8)); if (!Number.isInteger(result.limit) || result.limit < 1) throw new Error("--limit must be a positive integer"); }
     else if (arg.startsWith("--only=")) { result.only = new Set(arg.slice(7).split(",").filter(Boolean)); if (result.only.size === 0) throw new Error("--only must name at least one fixture"); }
@@ -136,13 +140,17 @@ function normalizedVisualRegions(legacy, ts) {
   );
   return {
     menuStrip: { x: 0, y: 0, width: menuStripWidth, height: Math.min(30, height) },
+    // The legacy `HorizontalPanel` control row is physically y=30..70 at
+    // the fixed desktop visual baseline.  Keep it un-normalized: it is
+    // application chrome, rather than a canvas-relative region.
+    runControls: { x: sidebarX, y: 30, width: width - sidebarX, height: 40 },
     top: { x: 0, y: 0, width, height: workspaceY },
     workspace: { x: 0, y: workspaceY, width: sidebarX, height: scopeY - workspaceY },
     right: { x: sidebarX, y: workspaceY, width: width - sidebarX, height: height - workspaceY },
     bottom: { x: 0, y: scopeY, width: sidebarX, height: height - scopeY }
   };
 }
-async function legacyLoad(page, baseUrl, id, source) {
+async function legacyLoad(page, baseUrl, id, source, runningControls = false) {
   const expectedPath = `/legacy/circuitjs1/circuits/${id}`;
   const requested = page.waitForResponse((response) => new URL(response.url()).pathname === expectedPath, { timeout: 20_000 });
   const url = new URL("/legacy/circuitjs.html", baseUrl); url.searchParams.set("startCircuit", id);
@@ -161,9 +169,23 @@ async function legacyLoad(page, baseUrl, id, source) {
     window.CircuitJS1.setVisualRegressionLayout(174, 665, true);
   });
   await stableCanvas(page);
-  const layout = await page.evaluate(() => window.CircuitJS1.getVisualRegressionLayout?.());
+  const legacyState = await page.evaluate((requireRunning) => {
+    const bridge = window.CircuitJS1;
+    if (requireRunning) {
+      if (typeof bridge?.setSimRunning !== "function" || typeof bridge?.isRunning !== "function") {
+        throw new Error("Legacy run-controls gate requires setSimRunning() and isRunning() bridge methods");
+      }
+      bridge.setSimRunning(true);
+    }
+    return {
+      layout: bridge?.getVisualRegressionLayout?.(),
+      running: typeof bridge?.isRunning === "function" ? bridge.isRunning() : null
+    };
+  }, runningControls);
+  const { layout, running } = legacyState;
   if (!visualLayoutStatus(layout)) throw new Error(`Invalid legacy visual layout: ${JSON.stringify(layout)}`);
-  return { requestedPath: expectedPath, sourceSha256: sha(actual), paused: true, canvas: layout.canvas, visualLayout: layout };
+  if (runningControls && running !== true) throw new Error(`Legacy run-controls gate could not enter RUN state: ${JSON.stringify(legacyState)}`);
+  return { requestedPath: expectedPath, sourceSha256: sha(actual), paused: running === false, running, canvas: layout.canvas, visualLayout: layout };
 }
 function textElementsIn(source) {
   return source
@@ -188,7 +210,7 @@ async function expectedElementsIn(page, source) {
     ).length;
   }, source);
 }
-async function tsLoad(page, baseUrl, source) {
+async function tsLoad(page, baseUrl, source, runningControls = false) {
   await page.goto(baseUrl, { waitUntil: "networkidle", timeout: 30_000 });
   await page.waitForFunction(() => typeof window.CircuitJS1TS?.loadCircuit === "function", undefined, { timeout: 20_000 });
   await page.evaluate((input) => window.CircuitJS1TS.loadCircuit(input), source);
@@ -204,7 +226,17 @@ async function tsLoad(page, baseUrl, source) {
   });
   const visualLayout = await page.evaluate(() => window.CircuitJS1TS.getVisualRegressionLayout?.());
   if (!visualLayoutStatus(visualLayout)) throw new Error(`Invalid TypeScript visual layout: ${JSON.stringify(visualLayout)}`);
-  return { inputSha256: sha(source), expectedElementCount, ...summary, exportedSha256: sha(exportedCircuit), paused: true, canvas, visualLayout };
+  // Regular static captures stay paused for deterministic canvas pixels.
+  // UIManager's source screenshot exposes RUN/Stop, however, so the focused
+  // run-controls gate switches only the visible state after the canvas has
+  // already settled. This avoids relabelling a red STOP state as a visual
+  // regression against the legacy RUN state.
+  const running = await page.evaluate((requireRunning) => {
+    if (requireRunning) window.CircuitJS1TS.setRunning(true);
+    return window.CircuitJS1TS.getDynamicSnapshot().running;
+  }, runningControls);
+  if (runningControls && running !== true) throw new Error(`TypeScript run-controls gate could not enter RUN state: ${running}`);
+  return { inputSha256: sha(source), expectedElementCount, ...summary, exportedSha256: sha(exportedCircuit), paused: !running, running, canvas, visualLayout };
 }
 async function popupGeometry(locator, label) {
   const box = await locator.boundingBox();
@@ -284,6 +316,21 @@ function applyMenuStripGate(result, enabled) {
     result.error = [result.error, `Menu-strip MAE ${metric.mae} exceeds ${MENU_STRIP_MAE}.`].filter(Boolean).join("\n");
   }
 }
+function applyRunControlsGate(result, enabled) {
+  if (!enabled || result.id !== RUN_CONTROLS_GATE_ID) return;
+  const metric = result.regionMetrics?.runControls;
+  const states = result.runControlsState;
+  if (states?.legacy !== true || states?.ts !== true || states.legacy !== states.ts) {
+    result.status = "failed";
+    result.error = [result.error, `Run-controls gate requires both products in the same RUN state; got ${JSON.stringify(states)}.`].filter(Boolean).join("\n");
+  } else if (!result.baseline?.valid || metric === undefined) {
+    result.status = "failed";
+    result.error = [result.error, `Run-controls gate requires a comparable ${RUN_CONTROLS_GATE_ID} baseline and metric.`].filter(Boolean).join("\n");
+  } else if (metric.mae > RUN_CONTROLS_MAE) {
+    result.status = "failed";
+    result.error = [result.error, `Run-controls MAE ${metric.mae} exceeds ${RUN_CONTROLS_MAE}.`].filter(Boolean).join("\n");
+  }
+}
 async function diffRegions(context, files, legacyLayout, tsLayout) {
   const regions = normalizedVisualRegions(legacyLayout, tsLayout), metrics = {};
   // `crop.y` is expressed in the legacy page's physical coordinates.  Move
@@ -292,12 +339,12 @@ async function diffRegions(context, files, legacyLayout, tsLayout) {
   const offsets = { legacyY: 0, tsY: tsLayout.workspaceOrigin.y - legacyLayout.workspaceOrigin.y };
   for (const [name, crop] of Object.entries(regions)) {
     const path = files.diff.replace(/\.png$/, `-${name}.png`);
-    const regionOffsets = name === "top" || name === "menuStrip" ? undefined : offsets;
+    const regionOffsets = name === "top" || name === "menuStrip" || name === "runControls" ? undefined : offsets;
     metrics[name] = { crop, file: path, ...(await diff(context, files.legacy, files.ts, path, crop, regionOffsets)) };
   }
   return metrics;
 }
-function html(results, output) { const image = (result, kind) => result.files?.[kind] ? `<a href="${relative(output,result.files[kind]).split(sep).join("/")}"><img src="${relative(output,result.files[kind]).split(sep).join("/")}"></a>` : "-"; const regions=(result)=>result.regionMetrics?Object.entries(result.regionMetrics).map(([name,value])=>`${name}: ${(value.diffPixelRatio*100).toFixed(2)}% / ${(value.mae*100).toFixed(3)}%`).join("<br>"):"-"; return `<!doctype html><meta charset="utf-8"><style>body{font:14px system-ui}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:6px;vertical-align:top}img{width:200px}</style><p>Review when changed pixels > ${REVIEW_DIFF_PIXEL_RATIO * 100}% or MAE > ${REVIEW_MAE * 100}%. Full-page metrics are diagnostic; region metrics localize menu chrome, workspace, and sidebar differences.</p><table><tr><th>Scenario</th><th>Status</th><th>Baseline</th><th>Full diff</th><th>Menu strip / top / workspace / right / bottom</th><th>Legacy</th><th>TS</th><th>Diff</th><th>Error</th></tr>${results.map((r)=>`<tr><td>${r.id}</td><td>${r.status}</td><td>${r.baseline?.valid===false?"invalid-baseline":r.baseline?.valid===true?"comparable":"-"}</td><td>${r.metrics ? `${(r.metrics.diffPixelRatio*100).toFixed(2)}% / ${(r.metrics.mae*100).toFixed(3)}%` : "-"}</td><td>${regions(r)}</td><td>${image(r,"legacy")}</td><td>${image(r,"ts")}</td><td>${image(r,"diff")}</td><td>${r.error??""}</td></tr>`).join("")}</table>`; }
+function html(results, output) { const image = (result, kind) => result.files?.[kind] ? `<a href="${relative(output,result.files[kind]).split(sep).join("/")}"><img src="${relative(output,result.files[kind]).split(sep).join("/")}"></a>` : "-"; const regions=(result)=>[result.runControlsState ? `run states: legacy=${String(result.runControlsState.legacy)}, ts=${String(result.runControlsState.ts)}` : undefined, result.regionMetrics ? Object.entries(result.regionMetrics).map(([name,value])=>`${name}: ${(value.diffPixelRatio*100).toFixed(2)}% / ${(value.mae*100).toFixed(3)}%`).join("<br>") : undefined].filter(Boolean).join("<br>") || "-"; return `<!doctype html><meta charset="utf-8"><style>body{font:14px system-ui}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:6px;vertical-align:top}img{width:200px}</style><p>Review when changed pixels > ${REVIEW_DIFF_PIXEL_RATIO * 100}% or MAE > ${REVIEW_MAE * 100}%. Full-page metrics are diagnostic; region metrics localize menu chrome, workspace, and sidebar differences.</p><table><tr><th>Scenario</th><th>Status</th><th>Baseline</th><th>Full diff</th><th>Run states / regions</th><th>Legacy</th><th>TS</th><th>Diff</th><th>Error</th></tr>${results.map((r)=>`<tr><td>${r.id}</td><td>${r.status}</td><td>${r.baseline?.valid===false?"invalid-baseline":r.baseline?.valid===true?"comparable":"-"}</td><td>${r.metrics ? `${(r.metrics.diffPixelRatio*100).toFixed(2)}% / ${(r.metrics.mae*100).toFixed(3)}%` : "-"}</td><td>${regions(r)}</td><td>${image(r,"legacy")}</td><td>${image(r,"ts")}</td><td>${image(r,"diff")}</td><td>${r.error??""}</td></tr>`).join("")}</table>`; }
 
 export async function run() {
   try {
@@ -309,6 +356,7 @@ export async function run() {
   const all = await findCircuits(CIRCUITS), candidates = options.only ? all.filter((file) => options.only.has(relative(CIRCUITS, file).split(sep).join("/"))) : all, selected = (options.limit ? candidates.slice(0, options.limit) : candidates).map((file) => ({ file, id: relative(CIRCUITS, file).split(sep).join("/") }));
   if (!selected.length) throw new Error("No circuit fixtures found");
   if (options.menuStripGate && (selected.length !== 1 || selected[0].id !== MENU_STRIP_GATE_ID)) throw new Error(`--menu-strip-gate requires --only=${MENU_STRIP_GATE_ID}`);
+  if (options.runControlsGate && (selected.length !== 1 || selected[0].id !== RUN_CONTROLS_GATE_ID)) throw new Error(`--run-controls-gate requires --only=${RUN_CONTROLS_GATE_ID}`);
   console.log(`Capturing ${selected.length}/${all.length} static circuit scenarios.`);
   const server = await createServer({ root: ROOT, logLevel: "error", plugins: [legacyPlugin()], server: { host: "127.0.0.1", port: 0 } }); await server.listen(); const address = server.httpServer.address(); if (!address || typeof address === "string") throw new Error("Vite did not expose a TCP address"); const baseUrl = `http://127.0.0.1:${address.port}/`;
   const browser = await chromium.launch({ headless: !options.headed }), context = await browser.newContext({ viewport: VIEWPORT, deviceScaleFactor: 1, serviceWorkers: "block" }), legacyPage = await context.newPage(), tsPage = await context.newPage(), legacyWatch = watch(legacyPage,"legacy"), tsWatch = watch(tsPage,"ts"); const results=[];
@@ -342,7 +390,7 @@ export async function run() {
       finally { addMonitorFailures(result,[menuLegacyWatch,menuTsWatch]); await menuLegacyPage.close().catch(() => {}); await menuTsPage.close().catch(() => {}); }
       await writeFile(join(options.output,"metadata",`${nameFor(id)}.json`),JSON.stringify(result,null,2));results.push(result);console.log(`[${result.status}] menu ${entry[0]}`);
     }
-    for(const scenario of selected){const files=filesFor(options.output,nameFor(scenario.id)),old=options.keepOutput&&await previous(options.output,scenario.id,files);if(old){applyMenuStripGate(old,options.menuStripGate);results.push(old);console.log(`[resumed] ${scenario.id}`);continue}const source=await readFile(scenario.file,"utf8"),result={id:scenario.id,status:"passed",captureStatus:"passed",files,error:undefined,source:{inputSha256:sha(source)}};legacyWatch.reset();tsWatch.reset();try{result.source.legacy=await legacyLoad(legacyPage,baseUrl,scenario.id,source);await shot(legacyPage,files.legacy);result.source.ts=await tsLoad(tsPage,baseUrl,source);await shot(tsPage,files.ts);result.baseline=comparableLayout(result.source.legacy.visualLayout,result.source.ts.visualLayout);if(!result.baseline.valid){result.status="invalid-baseline"}else if(options.diff){result.metrics=await diff(context,files.legacy,files.ts,files.diff);result.regionMetrics=await diffRegions(context,files,result.source.legacy.visualLayout,result.source.ts.visualLayout);if(result.metrics.diffPixelRatio>REVIEW_DIFF_PIXEL_RATIO||result.metrics.mae>REVIEW_MAE)result.status="review"}}catch(error){result.status="failed";result.captureStatus="failed";result.error=errorText(error)}addMonitorFailures(result,[legacyWatch,tsWatch]);applyMenuStripGate(result,options.menuStripGate);await writeFile(join(options.output,"metadata",`${nameFor(scenario.id)}.json`),JSON.stringify(result,null,2));results.push(result);console.log(`[${result.status}] ${scenario.id}`)}
+    for(const scenario of selected){const files=filesFor(options.output,nameFor(scenario.id)),old=options.keepOutput&&await previous(options.output,scenario.id,files);if(old){applyMenuStripGate(old,options.menuStripGate);applyRunControlsGate(old,options.runControlsGate);results.push(old);console.log(`[resumed] ${scenario.id}`);continue}const source=await readFile(scenario.file,"utf8"),result={id:scenario.id,status:"passed",captureStatus:"passed",files,error:undefined,source:{inputSha256:sha(source)}};legacyWatch.reset();tsWatch.reset();try{result.source.legacy=await legacyLoad(legacyPage,baseUrl,scenario.id,source,options.runControlsGate);await shot(legacyPage,files.legacy);result.source.ts=await tsLoad(tsPage,baseUrl,source,options.runControlsGate);result.runControlsState={legacy:result.source.legacy.running,ts:result.source.ts.running};await shot(tsPage,files.ts);result.baseline=comparableLayout(result.source.legacy.visualLayout,result.source.ts.visualLayout);if(!result.baseline.valid){result.status="invalid-baseline"}else if(options.diff){result.metrics=await diff(context,files.legacy,files.ts,files.diff);result.regionMetrics=await diffRegions(context,files,result.source.legacy.visualLayout,result.source.ts.visualLayout);if(result.metrics.diffPixelRatio>REVIEW_DIFF_PIXEL_RATIO||result.metrics.mae>REVIEW_MAE)result.status="review"}}catch(error){result.status="failed";result.captureStatus="failed";result.error=errorText(error)}addMonitorFailures(result,[legacyWatch,tsWatch]);applyMenuStripGate(result,options.menuStripGate);applyRunControlsGate(result,options.runControlsGate);await writeFile(join(options.output,"metadata",`${nameFor(scenario.id)}.json`),JSON.stringify(result,null,2));results.push(result);console.log(`[${result.status}] ${scenario.id}`)}
   } finally { await context.close();await browser.close();await server.close(); }
-  const summary={passed:results.filter((r)=>r.status==="passed").length,review:results.filter((r)=>r.status==="review").length,invalidBaseline:results.filter((r)=>r.status==="invalid-baseline").length,failed:results.filter((r)=>r.status==="failed").length}; const report={generatedAt:new Date().toISOString(),viewport:VIEWPORT,thresholds:{REVIEW_DIFF_PIXEL_RATIO,REVIEW_MAE,MENU_STRIP_MAE:options.menuStripGate?MENU_STRIP_MAE:undefined},execution:{mode:options.menuStripGate?"menu-strip-gate":options.strict?"strict-gate":"review-collection",strict:options.strict,menuStripGate:options.menuStripGate,exitNonZeroWhen:options.strict?"review, invalid-baseline, or failed":"invalid-baseline or failed"},source:{totalScenarios:all.length,capturedScenarios:selected.length},summary,results}; await writeFile(join(options.output,"report.json"),JSON.stringify(report,null,2));await writeFile(join(options.output,"report.html"),html(results,options.output));console.log(`Report: ${join(options.output,"report.html")}`);if(summary.failed||summary.invalidBaseline||(options.strict&&summary.review))process.exitCode=1;
+  const summary={passed:results.filter((r)=>r.status==="passed").length,review:results.filter((r)=>r.status==="review").length,invalidBaseline:results.filter((r)=>r.status==="invalid-baseline").length,failed:results.filter((r)=>r.status==="failed").length}; const report={generatedAt:new Date().toISOString(),viewport:VIEWPORT,thresholds:{REVIEW_DIFF_PIXEL_RATIO,REVIEW_MAE,MENU_STRIP_MAE:options.menuStripGate?MENU_STRIP_MAE:undefined,RUN_CONTROLS_MAE:options.runControlsGate?RUN_CONTROLS_MAE:undefined},execution:{mode:options.runControlsGate?"run-controls-gate":options.menuStripGate?"menu-strip-gate":options.strict?"strict-gate":"review-collection",strict:options.strict,menuStripGate:options.menuStripGate,runControlsGate:options.runControlsGate,exitNonZeroWhen:options.strict?"review, invalid-baseline, or failed":"invalid-baseline or failed"},source:{totalScenarios:all.length,capturedScenarios:selected.length},summary,results}; await writeFile(join(options.output,"report.json"),JSON.stringify(report,null,2));await writeFile(join(options.output,"report.html"),html(results,options.output));console.log(`Report: ${join(options.output,"report.html")}`);if(summary.failed||summary.invalidBaseline||(options.strict&&summary.review))process.exitCode=1;
 }

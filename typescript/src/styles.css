@@ -255,11 +255,6 @@ button {
   min-width: 220px;
 }
 
-.option-menu .modification-setup {
-  font-style: italic;
-  font-weight: 600;
-}
-
 .context-menu {
   position: fixed;
   z-index: 200;
@@ -769,7 +764,7 @@ button {
   min-width: 0;
   padding: 8px 9px;
   border-left: 1px solid #aeb3ba;
-  background: #f7f7f7;
+  background: #fff;
   overflow: auto;
   font-size: 12px;
   transition:
@@ -778,29 +773,46 @@ button {
 }
 
 .run-row {
-  display: grid;
-  grid-template-columns: 1fr 1.35fr;
-  gap: 5px;
-  margin-bottom: 11px;
+  /* UIManager uses a HorizontalPanel at the desktop sidebar width.  Its
+   * controls retain their intrinsic label widths; they are not two equal
+   * grid columns.  Keeping this a 40px row also makes the controls occupy
+   * exactly the menu/toolbar strip alongside the canvas. */
+  display: flex;
+  align-items: flex-start;
+  height: 40px;
+  /* The native panel keeps 8px content padding for its form controls; the
+   * GWT HorizontalPanel starts flush with its sidebar. Offset only this row
+   * so the sidebar's canvas edge and all later controls retain their layout. */
+  margin: 0 0 0 -2px;
+  transform: translateY(-8px);
 }
 
 .run-row button {
-  min-height: 26px;
-  padding: 3px 5px;
-  border: 1px solid #aaa;
-  border-radius: 0;
-  background: #f8f8f8;
+  /* Keep this deliberately close to circuitjs.html's .topButton rules.
+   * The app-wide border-box reset would otherwise shrink the old GWT button
+   * by including its padding in the intrinsic content size. */
+  box-sizing: border-box;
+  min-height: 0;
+  height: 30px;
+  margin: 5px 0 5px 5px;
+  padding: 5px 7px;
+  border: 1px solid #bbb;
+  border-bottom-color: #a0a0a0;
+  border-radius: 3px;
+  background: #e7e7e7;
   cursor: pointer;
+  font-family: "Arial Unicode MS", Arial, sans-serif;
+  font-size: small;
+  line-height: normal;
 }
 
 .run-row button.topButton {
-  color: #222;
+  color: #000;
 }
 
 .run-row button.topButton-red {
-  border-color: #b33;
-  color: #a00;
-  background: #fff0f0;
+  color: #fff;
+  background: #f00;
 }
 
 .control-panel label {
