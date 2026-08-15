@@ -34,6 +34,7 @@ import {
   Switch2Elm,
   SwitchElm,
   StopTriggerElm,
+  TextElm,
   ThermistorNTCElm,
   TransistorElm,
   ThreePhaseMotorElm,
@@ -1771,7 +1772,11 @@ export class NativeCircuitApp {
   }
 
   private canEditElement(element: CircuitElm): boolean {
-    if (element instanceof SwitchElm) return true;
+    if (
+      element instanceof SwitchElm ||
+      element instanceof TextElm ||
+      element instanceof LabeledNodeElm
+    ) return true;
     return (
       this.root.querySelector("#element-properties .property-row") !== null
     );
@@ -1804,7 +1809,13 @@ export class NativeCircuitApp {
       dataName: string,
       dataValue: string,
       unit = "",
-      options: { integer?: boolean; min?: number; max?: number } = {}
+      options: {
+        integer?: boolean;
+        min?: number;
+        max?: number;
+        multiline?: boolean;
+        required?: boolean;
+      } = {}
     ) => {
       const label = document.createElement("label");
       label.className = "element-edit-row";
@@ -1812,14 +1823,22 @@ export class NativeCircuitApp {
       caption.textContent = labelText;
       const control = document.createElement("span");
       control.className = "element-edit-control";
-      const input = document.createElement("input");
-      input.type = options.integer ? "number" : "text";
+      const input = options.multiline
+        ? document.createElement("textarea")
+        : document.createElement("input");
+      if (input instanceof HTMLInputElement) {
+        input.type = options.integer ? "number" : "text";
+      } else {
+        input.rows = 5;
+      }
       input.value = value;
-      input.required = true;
+      input.required = options.required ?? true;
       input.dataset[dataName] = dataValue;
-      if (options.integer) input.step = "1";
-      if (options.min !== undefined) input.min = String(options.min);
-      if (options.max !== undefined) input.max = String(options.max);
+      if (input instanceof HTMLInputElement) {
+        if (options.integer) input.step = "1";
+        if (options.min !== undefined) input.min = String(options.min);
+        if (options.max !== undefined) input.max = String(options.max);
+      }
       const suffix = document.createElement("small");
       suffix.textContent = unit;
       control.append(input, suffix);
@@ -1874,6 +1893,27 @@ export class NativeCircuitApp {
         "editSwitch",
         "keyShortcut"
       );
+    } else if (element instanceof TextElm) {
+      addTextField(
+        "文本",
+        element.text.replace(/\\n/g, "\n"),
+        "editSwitch",
+        "text",
+        "",
+        { multiline: true, required: false }
+      );
+      addTextField("字号", String(element.size), "editSwitch", "size", "", {
+        integer: true,
+        min: 5,
+        max: 100
+      });
+      addCheckbox("顶部横线", element.hasFlag(TextElm.FLAG_BAR), "bar");
+    } else if (element instanceof LabeledNodeElm) {
+      addTextField("名称", element.text, "editSwitch", "name", "", {
+        required: false
+      });
+      addCheckbox("内部节点", element.isInternal(), "internal");
+      addCheckbox("旋转文字", element.isRotateText(), "rotateText");
     } else {
       const sourceRows = this.root.querySelectorAll<HTMLElement>(
         "#element-properties .property-row"
@@ -1907,7 +1947,9 @@ export class NativeCircuitApp {
 
     if (fields.childElementCount === 0) return;
     if (!dialog.open) dialog.showModal();
-    fields.querySelector<HTMLInputElement>("input")?.focus();
+    fields.querySelector<HTMLInputElement | HTMLTextAreaElement>(
+      "input, textarea"
+    )?.focus();
   }
 
   private applyElementEditor(): void {
@@ -1978,6 +2020,43 @@ export class NativeCircuitApp {
       const shortcut = (getSwitchInput("keyShortcut")?.value ?? "").trim();
       element.keyShortcut =
         shortcut.length === 0 ? null : shortcut[0].toLowerCase();
+      element.setPoints();
+    } else if (element instanceof TextElm) {
+      const textInput = fields.querySelector<HTMLTextAreaElement>(
+        'textarea[data-edit-switch="text"]'
+      );
+      const sizeInput = getSwitchInput("size");
+      if (
+        textInput === null ||
+        sizeInput === null ||
+        !sizeInput.checkValidity()
+      ) {
+        error.textContent = "字号必须是 5 到 100 之间的整数。";
+        return;
+      }
+      element.text = textInput.value.replace(/\r?\n/g, "\\n");
+      element.size = Math.trunc(Number(sizeInput.value));
+      if (getSwitchInput("bar")?.checked) {
+        element.flags |= TextElm.FLAG_BAR;
+      } else {
+        element.flags &= ~TextElm.FLAG_BAR;
+      }
+      element.split();
+      element.setPoints();
+    } else if (element instanceof LabeledNodeElm) {
+      const nameInput = getSwitchInput("name");
+      if (nameInput === null) return;
+      element.text = nameInput.value;
+      if (getSwitchInput("internal")?.checked) {
+        element.flags |= LabeledNodeElm.FLAG_INTERNAL;
+      } else {
+        element.flags &= ~LabeledNodeElm.FLAG_INTERNAL;
+      }
+      if (getSwitchInput("rotateText")?.checked) {
+        element.flags |= LabeledNodeElm.FLAG_ROTATE_TEXT;
+      } else {
+        element.flags &= ~LabeledNodeElm.FLAG_ROTATE_TEXT;
+      }
       element.setPoints();
     }
 
