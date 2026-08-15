@@ -120,6 +120,51 @@ export function shouldDrawCurrentDots(
   );
 }
 
+/** Java's `(int)` cast in CircuitElm.drawDots truncates, never rounds. */
+export function currentDotLocation(
+  start: { x: number; y: number },
+  end: { x: number; y: number },
+  distance: number
+): { x: number; y: number } {
+  const length = Math.hypot(end.x - start.x, end.y - start.y);
+  if (length === 0) return { x: Math.trunc(start.x), y: Math.trunc(start.y) };
+  return {
+    x: Math.trunc(start.x + distance * (end.x - start.x) / length),
+    y: Math.trunc(start.y + distance * (end.y - start.y) / length)
+  };
+}
+
+export function currentDotScreenLocation(
+  start: { x: number; y: number },
+  end: { x: number; y: number },
+  distance: number,
+  viewport: { scale: number; offsetX: number; offsetY: number }
+): { x: number; y: number } {
+  const point = currentDotLocation(start, end, distance);
+  return {
+    x: point.x * viewport.scale + viewport.offsetX,
+    y: point.y * viewport.scale + viewport.offsetY
+  };
+}
+
+export function currentDotDistances(length: number, phase: number): number[] {
+  const normalized = ((phase % 16) + 16) % 16;
+  const distances: number[] = [];
+  for (let distance = normalized; distance < length; distance += 16) {
+    distances.push(distance);
+  }
+  return distances;
+}
+
+export function potWiperContinuationPhase(
+  phase: number,
+  post: { x: number; y: number },
+  corner: { x: number; y: number }
+): number {
+  if (Math.abs(phase) === CURRENT_TOO_FAST) return phase;
+  return phase + Math.hypot(corner.x - post.x, corner.y - post.y);
+}
+
 export function getCurrentDotAnimationCurrent(element: CircuitElm): number {
   if (element instanceof RailElm) {
     // RailElm's MNA source current is defined from ground toward the post,
@@ -133,6 +178,23 @@ export function getCurrentDotAnimationCurrent(element: CircuitElm): number {
     return element.currents[0] ?? 0;
   }
   return element.getCurrent();
+}
+
+/** Exact local-space ResistorElm.draw geometry (before canvas rotation). */
+export function legacyResistorGeometry(
+  leadLength: number,
+  modelLength: number
+): { halfSize: number; zigzag: Array<{ x: number; y: number }> } {
+  const halfSize = modelLength < 30 ? 2 : 6;
+  const zigzag = [{ x: 0, y: 0 }];
+  for (let index = 0; index < 4; index += 1) {
+    zigzag.push(
+      { x: (1 + 4 * index) * leadLength / 16, y: halfSize },
+      { x: (3 + 4 * index) * leadLength / 16, y: -halfSize }
+    );
+  }
+  zigzag.push({ x: leadLength, y: 0 });
+  return { halfSize, zigzag };
 }
 
 interface ModelBounds {
@@ -220,10 +282,11 @@ export class CircuitCanvasRenderer {
       return;
     }
 
-    // Matches UIManager.centerCircuit() in the legacy application. Its
+    // Matches UIManager.centerCircuit() in the legacy application.  Its
     // bounds include each element's actual visual box (chips and composites
     // can extend beyond x/y endpoints), and margins are added to the circuit
-    // rather than subtracted from the viewport.
+    // rather than subtracted from the viewport.  Keeping this exact formula
+    // preserves the familiar initial framing of saved circuits.
     let minX = 30_000;
     let maxX = -30_000;
     let minY = 30_000;
@@ -584,13 +647,15 @@ export class CircuitCanvasRenderer {
       this.drawVariableResistor(
         context,
         element,
-        `${Math.round(element.lux)} lx`
+        `${Math.round(element.lux)} lx`,
+        selected
       );
     } else if (element instanceof ThermistorNTCElm) {
       this.drawVariableResistor(
         context,
         element,
-        `${element.temperature} °C`
+        `${element.temperature} °C`,
+        selected
       );
     } else if (element instanceof TriStateElm) {
       this.drawTriState(context, element);
@@ -629,7 +694,7 @@ export class CircuitCanvasRenderer {
         post2
       );
     } else if (element instanceof PotElm) {
-      this.drawPot(context, element);
+      this.drawPot(context, element, selected);
     } else if (element instanceof PolarCapacitorElm) {
       this.drawCapacitor(context, element, selected);
       this.drawPolarMark(context, post1, post2);
@@ -810,38 +875,47 @@ export class CircuitCanvasRenderer {
         dotPosition
       );
     }
+    if (element instanceof PotElm) {
+      this.drawPotValues(context, element);
+    }
     context.restore();
   }
 
   private drawResistor(
     context: CanvasRenderingContext2D,
     start: { x: number; y: number },
-    end: { x: number; y: number }
+    end: { x: number; y: number },
+    modelLength: number
   ): void {
-    const { ux, uy, px, py, length } =
+    const { ux, uy, length } =
       CircuitCanvasRenderer.direction(start, end);
-    const amplitude = Math.min(7, length / 5);
+    const geometry = legacyResistorGeometry(length, modelLength);
+    // Java applies both ResistorElm's 6px local half-size and its explicit
+    // 3px stroke inside the circuit viewport transform.
+    const halfSize = geometry.halfSize * this.viewport.scale;
+    const lineWidth = 3 * this.viewport.scale;
+    // ResistorElm explicitly sets width 3 after its leads.  It must not
+    // inherit the selected-element width (4) from the generic dispatcher.
+    context.save();
+    context.lineWidth = lineWidth;
     if (this.europeanResistors) {
-      context.save();
       context.translate(start.x, start.y);
       context.rotate(Math.atan2(uy, ux));
-      context.strokeRect(0, -amplitude, length, amplitude * 2);
+      context.strokeRect(0, -halfSize, length, halfSize * 2);
       context.restore();
       return;
     }
+    context.restore();
+    context.save();
+    context.lineWidth = lineWidth;
     context.beginPath();
-    context.moveTo(start.x, start.y);
-    const segments = 8;
-    for (let index = 1; index < segments; index += 1) {
-      const fraction = index / segments;
-      const offset = index % 2 === 0 ? -amplitude : amplitude;
-      context.lineTo(
-        start.x + ux * length * fraction + px * offset,
-        start.y + uy * length * fraction + py * offset
-      );
+    context.translate(start.x, start.y);
+    context.rotate(Math.atan2(uy, ux));
+    for (const point of geometry.zigzag) {
+      context.lineTo(point.x, point.y * this.viewport.scale);
     }
-    context.lineTo(end.x, end.y);
     context.stroke();
+    context.restore();
   }
 
   private drawResistiveElement(
@@ -855,7 +929,7 @@ export class CircuitCanvasRenderer {
   ): void {
     if (selected || !this.showVoltage || this.showPower) {
       this.drawLeads(context, post1, lead1, lead2, post2);
-      this.drawResistor(context, lead1, lead2);
+      this.drawResistor(context, lead1, lead2, element.dn);
       return;
     }
 
@@ -873,7 +947,7 @@ export class CircuitCanvasRenderer {
     gradient.addColorStop(0, this.voltageColor(element.volts[0] ?? 0));
     gradient.addColorStop(1, this.voltageColor(element.volts[1] ?? 0));
     context.strokeStyle = gradient;
-    this.drawResistor(context, lead1, lead2);
+    this.drawResistor(context, lead1, lead2, element.dn);
     context.restore();
   }
 
@@ -918,14 +992,64 @@ export class CircuitCanvasRenderer {
   private drawVariableResistor(
     context: CanvasRenderingContext2D,
     element: LDRElm | ThermistorNTCElm,
-    detail: string
+    detail: string,
+    selected: boolean
   ): void {
     const first = this.modelToScreen(element.point1);
     const second = this.modelToScreen(element.point2);
     const lead1 = this.modelToScreen(element.lead1);
     const lead2 = this.modelToScreen(element.lead2);
-    this.drawLeads(context, first, lead1, lead2, second);
-    this.drawResistor(context, lead1, lead2);
+    context.save();
+    context.lineWidth = 3 * this.viewport.scale;
+    if (!selected && this.showVoltage) {
+      context.strokeStyle = this.voltageColor(element.volts[0] ?? 0);
+    }
+    this.line(context, first.x, first.y, lead1.x, lead1.y);
+    if (!selected && this.showVoltage) {
+      context.strokeStyle = this.voltageColor(element.volts[1] ?? 0);
+    }
+    this.line(context, lead2.x, lead2.y, second.x, second.y);
+
+    const direction = CircuitCanvasRenderer.direction(lead1, lead2);
+    const scale = this.viewport.scale;
+    context.lineWidth = 3 * scale;
+    context.translate(lead1.x, lead1.y);
+    context.rotate(Math.atan2(direction.uy, direction.ux));
+    if (!selected && this.showVoltage) {
+      const gradient = context.createLinearGradient(0, 0, direction.length, 0);
+      gradient.addColorStop(0, this.voltageColor(element.volts[0] ?? 0));
+      gradient.addColorStop(1, this.voltageColor(element.volts[1] ?? 0));
+      context.strokeStyle = gradient;
+    }
+    const halfSize = 6 * scale;
+    if (this.europeanResistors) {
+      context.strokeRect(0, -halfSize, direction.length, halfSize * 2);
+    } else {
+      const geometry = legacyResistorGeometry(direction.length, 64);
+      context.beginPath();
+      for (const point of geometry.zigzag) {
+        context.lineTo(point.x, point.y * scale);
+      }
+      context.stroke();
+    }
+
+    context.beginPath();
+    if (element instanceof LDRElm) {
+      const ldrLines = [
+        [-8, 26, 8, 12], [2, 12, 8, 12], [8, 12, 8, 18],
+        [12, 26, 26, 12], [20, 12, 26, 12], [26, 12, 26, 18]
+      ];
+      for (const [x1, y1, x2, y2] of ldrLines) {
+        context.moveTo(x1 * scale, y1 * scale);
+        context.lineTo(x2 * scale, y2 * scale);
+      }
+    } else {
+      context.moveTo(-halfSize, halfSize * 2);
+      context.lineTo(halfSize, halfSize * 2);
+      context.lineTo(direction.length, -halfSize * 2);
+    }
+    context.stroke();
+    context.restore();
     this.drawLabel(context, detail, first, second);
   }
 
@@ -2395,7 +2519,8 @@ export class CircuitCanvasRenderer {
 
   private drawPot(
     context: CanvasRenderingContext2D,
-    element: PotElm
+    element: PotElm,
+    selected: boolean
   ): void {
     const post1 = this.modelToScreen(element.point1);
     const post2 = this.modelToScreen(element.point2);
@@ -2404,23 +2529,176 @@ export class CircuitCanvasRenderer {
     const wiperPost = this.modelToScreen(element.post3);
     const corner = this.modelToScreen(element.corner2);
     const arrow = this.modelToScreen(element.arrowPoint);
-    this.drawLeads(context, post1, lead1, lead2, post2);
-    this.drawResistor(context, lead1, lead2);
+    const voltageColor = (voltage: number): string =>
+      selected
+        ? this.selectionColor
+        : this.showVoltage
+          ? this.voltageColor(voltage)
+          : this.foregroundColor();
+    context.save();
+    context.lineWidth = 3 * this.viewport.scale;
+    context.strokeStyle = voltageColor(element.volts[0] ?? 0);
+    this.line(context, post1.x, post1.y, lead1.x, lead1.y);
+    context.strokeStyle = voltageColor(element.volts[1] ?? 0);
+    this.line(context, lead2.x, lead2.y, post2.x, post2.y);
+
+    const direction = CircuitCanvasRenderer.direction(lead1, lead2);
+    const scale = this.viewport.scale;
+    const segments = 16;
+    const divide = Math.trunc(segments * element.position);
+    const v1 = element.volts[0] ?? 0;
+    const v2 = element.volts[1] ?? 0;
+    const v3 = element.volts[2] ?? 0;
+    const segmentVoltage = (index: number): number =>
+      index < divide
+        ? v1 + (v3 - v1) * index / divide
+        : v3 + (v2 - v3) * (index - divide) / (segments - divide);
+    const offsetPoint = (fraction: number, offset: number) => ({
+      x: lead1.x + direction.ux * direction.length * fraction +
+        direction.px * offset,
+      y: lead1.y + direction.uy * direction.length * fraction +
+        direction.py * offset
+    });
+    const halfSize = (this.europeanResistors ? 6 : 8) * scale;
+    if (!this.europeanResistors) {
+      let previousOffset = 0;
+      for (let index = 0; index < segments; index += 1) {
+        const nextOffset =
+          (index & 3) === 0 ? halfSize : (index & 3) === 2 ? -halfSize : 0;
+        const from = offsetPoint(index / segments, previousOffset);
+        const to = offsetPoint((index + 1) / segments, nextOffset);
+        context.strokeStyle = voltageColor(segmentVoltage(index));
+        this.line(context, from.x, from.y, to.x, to.y);
+        previousOffset = nextOffset;
+      }
+    } else {
+      let edge = offsetPoint(0, halfSize);
+      let opposite = offsetPoint(0, -halfSize);
+      context.strokeStyle = voltageColor(v1);
+      this.line(context, edge.x, edge.y, opposite.x, opposite.y);
+      for (let index = 0; index < segments; index += 1) {
+        const nextEdge = offsetPoint((index + 1) / segments, halfSize);
+        const nextOpposite = offsetPoint((index + 1) / segments, -halfSize);
+        context.strokeStyle = voltageColor(segmentVoltage(index));
+        this.line(context, edge.x, edge.y, nextEdge.x, nextEdge.y);
+        this.line(
+          context,
+          opposite.x,
+          opposite.y,
+          nextOpposite.x,
+          nextOpposite.y
+        );
+        edge = nextEdge;
+        opposite = nextOpposite;
+      }
+      this.line(context, edge.x, edge.y, opposite.x, opposite.y);
+    }
+
+    context.strokeStyle = voltageColor(v3);
     this.line(context, wiperPost.x, wiperPost.y, corner.x, corner.y);
     this.line(context, corner.x, corner.y, arrow.x, arrow.y);
+    const arrowDirection = CircuitCanvasRenderer.direction(corner, arrow);
+    const arrowBase = {
+      x: arrow.x - arrowDirection.ux * 8 * scale,
+      y: arrow.y - arrowDirection.uy * 8 * scale
+    };
+    this.line(
+      context,
+      arrow.x,
+      arrow.y,
+      arrowBase.x + arrowDirection.px * 8 * scale,
+      arrowBase.y + arrowDirection.py * 8 * scale
+    );
+    this.line(
+      context,
+      arrow.x,
+      arrow.y,
+      arrowBase.x - arrowDirection.px * 8 * scale,
+      arrowBase.y - arrowDirection.py * 8 * scale
+    );
+    context.restore();
+  }
+
+  private drawPotValues(
+    context: CanvasRenderingContext2D,
+    element: PotElm
+  ): void {
+    if (
+      !this.showValues ||
+      element.resistance1 <= 0 ||
+      !element.hasFlag(PotElm.FLAG_SHOW_VALUES)
+    ) {
+      return;
+    }
+    const lead1 = this.modelToScreen(element.lead1);
+    const lead2 = this.modelToScreen(element.lead2);
+    const corner = this.modelToScreen(element.corner2);
+    const arrow = this.modelToScreen(element.arrowPoint);
+    const scale = this.viewport.scale;
     const direction = CircuitCanvasRenderer.direction(corner, arrow);
-    context.beginPath();
-    context.moveTo(arrow.x, arrow.y);
-    context.lineTo(
-      arrow.x - direction.ux * 7 + direction.px * 4,
-      arrow.y - direction.uy * 7 + direction.py * 4
+    const base = {
+      x: arrow.x - direction.ux * 8 * scale,
+      y: arrow.y - direction.uy * 8 * scale
+    };
+    const arrow1 = {
+      x: base.x + direction.px * 8 * scale,
+      y: base.y + direction.py * 8 * scale
+    };
+    const arrow2 = {
+      x: base.x - direction.px * 8 * scale,
+      y: base.y - direction.py * 8 * scale
+    };
+    const vertical = element.lead1.x === element.lead2.x;
+    const reverseY = element.post3.x < element.lead1.x && vertical;
+    const reverseX = element.post3.y < element.lead1.y && !vertical;
+    const reversed =
+      (vertical && element.lead1.y < element.lead2.y) ||
+      (!vertical && element.lead1.x > element.lead2.x);
+    const first = CircuitElm.getShortUnitText(
+      reversed ? element.resistance2 : element.resistance1,
+      ""
     );
-    context.lineTo(
-      arrow.x - direction.ux * 7 - direction.px * 4,
-      arrow.y - direction.uy * 7 - direction.py * 4
+    const second = CircuitElm.getShortUnitText(
+      reversed ? element.resistance1 : element.resistance2,
+      ""
     );
-    context.closePath();
-    context.fill();
+
+    context.save();
+    const fontSize = 12 * scale;
+    const halfFont = 6 * scale;
+    context.font = `${fontSize}px SansSerif`;
+    context.textAlign = "left";
+    context.textBaseline = "alphabetic";
+    context.fillStyle = this.whiteBackground ? "#000000" : "#ffffff";
+    const firstWidth = context.measureText(first).width;
+    if (vertical) {
+      context.fillText(
+        first,
+        reverseY ? arrow.x - 2 * scale - firstWidth : arrow.x + 2 * scale,
+        Math.max(arrow1.y, arrow2.y) + 5 * scale + halfFont
+      );
+    } else {
+      context.fillText(
+        first,
+        Math.min(arrow1.x, arrow2.x) - 2 * scale - firstWidth,
+        reverseX ? arrow.y - 4 * scale : arrow.y + 4 * scale + halfFont
+      );
+    }
+    const secondWidth = context.measureText(second).width;
+    if (vertical) {
+      context.fillText(
+        second,
+        reverseY ? arrow.x - 2 * scale - secondWidth : arrow.x + 2 * scale,
+        Math.min(arrow1.y, arrow2.y) - 3 * scale
+      );
+    } else {
+      context.fillText(
+        second,
+        Math.max(arrow1.x, arrow2.x) + 2 * scale,
+        reverseX ? arrow.y - 4 * scale : arrow.y + 4 * scale + halfFont
+      );
+    }
+    context.restore();
   }
 
   private drawPotCurrentDots(
@@ -2468,19 +2746,16 @@ export class CircuitCanvasRenderer {
       element.current3,
       element.curcount3
     );
-    const wiperOffset =
-      Math.hypot(
-        element.corner2.x - element.post3.x,
-        element.corner2.y - element.post3.y
-      ) * this.viewport.scale;
     this.drawCurrentDots(
       context,
       this.modelToScreen(element.corner2),
       this.modelToScreen(element.midpoint),
       element.current3,
-      Math.abs(element.curcount3) === CURRENT_TOO_FAST
-        ? element.curcount3
-        : element.curcount3 + wiperOffset
+      potWiperContinuationPhase(
+        element.curcount3,
+        element.post3,
+        element.corner2
+      )
     );
   }
 
@@ -4592,28 +4867,50 @@ export class CircuitCanvasRenderer {
     if (!shouldDrawCurrentDots(current, dotPosition)) {
       return;
     }
-    const length = Math.hypot(end.x - start.x, end.y - start.y);
-    if (length < 12) {
-      return;
-    }
+    const rawModelStart = this.screenToModel(start.x, start.y);
+    const rawModelEnd = this.screenToModel(end.x, end.y);
+    // Every Java caller supplies integer Point coordinates.  Reconstruct those
+    // before interpolation so `(int)` truncation happens in model space.
+    const modelStart = {
+      x: Math.round(rawModelStart.x),
+      y: Math.round(rawModelStart.y)
+    };
+    const modelEnd = {
+      x: Math.round(rawModelEnd.x),
+      y: Math.round(rawModelEnd.y)
+    };
+    const length = Math.hypot(
+      modelEnd.x - modelStart.x,
+      modelEnd.y - modelStart.y
+    );
+    if (length === 0) return;
     let phase = dotPosition;
+    const scale = this.viewport.scale;
     context.save();
     context.fillStyle = this.currentColor;
     if (Math.abs(phase) === CURRENT_TOO_FAST) {
       context.save();
       context.globalAlpha = 0.5;
-      context.lineWidth = 4;
+      context.lineWidth = 4 * scale;
       context.strokeStyle = this.currentColor;
       this.line(context, start.x, start.y, end.x, end.y);
       context.restore();
       phase = Math.random() * 16;
     }
-    phase = ((phase % 16) + 16) % 16;
-    for (let distance = phase; distance < length; distance += 16) {
-      const fraction = distance / length;
-      const x = start.x + (end.x - start.x) * fraction;
-      const y = start.y + (end.y - start.y) * fraction;
-      context.fillRect(Math.round(x) - 2, Math.round(y) - 2, 4, 4);
+    for (const distance of currentDotDistances(length, phase)) {
+      const point = currentDotScreenLocation(
+        modelStart,
+        modelEnd,
+        distance,
+        this.viewport
+      );
+      const dotSize = 4 * scale;
+      context.fillRect(
+        point.x - dotSize / 2,
+        point.y - dotSize / 2,
+        dotSize,
+        dotSize
+      );
     }
     context.restore();
   }

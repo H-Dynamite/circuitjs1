@@ -1,16 +1,24 @@
 import {
   CircuitRunner,
+  LDRElm,
+  PotElm,
   RailElm,
   StringTokenizer,
   Switch2Elm,
   SwitchElm,
+  ThermistorNTCElm,
   WireElm
 } from "../src/core";
 import {
   calculateCurrentDotAdvance,
   CircuitCanvasRenderer,
+  currentDotDistances,
+  currentDotLocation,
+  currentDotScreenLocation,
   getCurrentDotAnimationCurrent,
   getSwitchInteractionBounds,
+  legacyResistorGeometry,
+  potWiperContinuationPhase,
   shouldDrawCurrentDots
 } from "../src/ui/CircuitCanvasRenderer";
 import { describe, expect, it } from "vitest";
@@ -102,6 +110,87 @@ describe("current dot animation", () => {
     expect(
       calculateCurrentDotAdvance(0.05, elapsedMilliseconds, 70)
     ).toBeGreaterThan(fast);
+  });
+
+  it("proves a scheduler-held zero-elapsed render cannot initialize dots", () => {
+    expect(calculateCurrentDotAdvance(0.05, 0, 50)).toBe(0);
+    expect(shouldDrawCurrentDots(0.05, 0)).toBe(false);
+  });
+
+  it("truncates dot coordinates like CircuitElm.drawDots", () => {
+    expect(
+      currentDotLocation({ x: 1.9, y: -1.9 }, { x: 5.9, y: -5.9 }, 1.5)
+    ).toEqual({ x: 2, y: -2 });
+  });
+
+  it("truncates negative model coordinates before a 1.5x viewport transform", () => {
+    expect(
+      currentDotScreenLocation(
+        { x: -5, y: -5 },
+        { x: 3, y: -1 },
+        1.5,
+        { scale: 1.5, offsetX: 10, offsetY: 20 }
+      )
+    ).toEqual({ x: 5.5, y: 14 });
+  });
+
+  it("keeps dots on segments shorter than the 16-unit spacing", () => {
+    expect(currentDotDistances(6, 1.25)).toEqual([1.25]);
+    expect(currentDotDistances(6, -1.25)).toEqual([]);
+  });
+
+  it("keeps PotElm wiper phase in model units at 1.5x scale", () => {
+    const phase = potWiperContinuationPhase(
+      5,
+      { x: 0, y: 0 },
+      { x: 0, y: 12 }
+    );
+    expect(phase).toBe(17);
+    expect(currentDotDistances(8, phase)).toEqual([1]);
+    expect(
+      currentDotScreenLocation(
+        { x: 0, y: 12 },
+        { x: 0, y: 20 },
+        1,
+        { scale: 1.5, offsetX: 10, offsetY: 20 }
+      )
+    ).toEqual({ x: 10, y: 39.5 });
+  });
+});
+
+describe("legacy resistor geometry", () => {
+  it("uses ResistorElm's four 1/16-to-3/16 zigzag pairs and fixed half-size", () => {
+    expect(legacyResistorGeometry(32, 64)).toEqual({
+      halfSize: 6,
+      zigzag: [
+        { x: 0, y: 0 }, { x: 2, y: 6 }, { x: 6, y: -6 },
+        { x: 10, y: 6 }, { x: 14, y: -6 }, { x: 18, y: 6 },
+        { x: 22, y: -6 }, { x: 26, y: 6 }, { x: 30, y: -6 },
+        { x: 32, y: 0 }
+      ]
+    });
+    expect(legacyResistorGeometry(24, 16).halfSize).toBe(2);
+  });
+
+  it("loads real text records for pot, LDR, and thermistor geometry", () => {
+    const runner = CircuitRunner.fromText(
+      [
+        "$ 1 0.000005 10 50 5",
+        "174 0 0 64 0 1 1000 0.5 Resistance",
+        "374 0 32 64 32 0 0.5 Light",
+        "350 0 64 64 64 0 10000 3000 -40 150 0.5 Temperature"
+      ].join("\n")
+    );
+
+    expect(runner.elements[0]).toBeInstanceOf(PotElm);
+    expect(runner.elements[1]).toBeInstanceOf(LDRElm);
+    expect(runner.elements[2]).toBeInstanceOf(ThermistorNTCElm);
+    for (const element of runner.elements) {
+      expect(Math.hypot(
+        element.lead2.x - element.lead1.x,
+        element.lead2.y - element.lead1.y
+      )).toBeCloseTo(32, 8);
+    }
   });
 });
 
