@@ -147,6 +147,7 @@ export class CircuitRunner {
   public preservedTextRecords: string[] = [];
   public preservedXmlRecords: XmlRecord[] = [];
   private readonly isolatedRails = new Set<RailElm>();
+  private postDrawList: ReadonlyArray<Readonly<Point>> = [];
   private diagnosticTrace: SolverTraceSample[] | null = null;
 
   public constructor(
@@ -562,6 +563,10 @@ export class CircuitRunner {
     return this.elements[index] ?? null;
   }
 
+  public getPostDrawList(): ReadonlyArray<Readonly<Point>> {
+    return this.analyzed ? this.postDrawList : this.buildPostDrawList();
+  }
+
   public resetTime(): void {
     this.simulation.t = 0;
   }
@@ -718,6 +723,7 @@ export class CircuitRunner {
     } else {
       this.matrix = null;
     }
+    this.postDrawList = this.buildPostDrawList();
     this.analyzed = true;
   }
 
@@ -997,6 +1003,25 @@ export class CircuitRunner {
 
   private static pointKey(point: Point): string {
     return `${point.x},${point.y},${point.z}`;
+  }
+
+  private buildPostDrawList(): ReadonlyArray<Readonly<Point>> {
+    const counts = new Map<string, { count: number; point: Point }>();
+    for (const element of this.elements) {
+      for (let post = 0; post < element.getPostCount(); post += 1) {
+        const point = element.getPost(post);
+        const key = CircuitRunner.pointKey(point);
+        const existing = counts.get(key);
+        if (existing === undefined) {
+          counts.set(key, { count: 1, point: new Point(point) });
+        } else {
+          existing.count += 1;
+        }
+      }
+    }
+    return [...counts.values()]
+      .filter(({ count }) => count !== 2)
+      .map(({ point }) => point);
   }
 
   private static loadXmlModel(record: XmlRecord): void {

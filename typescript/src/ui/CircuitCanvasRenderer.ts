@@ -445,6 +445,7 @@ export class CircuitCanvasRenderer {
     width: number,
     height: number,
     elements: CircuitElm[],
+    postDrawList: ReadonlyArray<Readonly<Point>>,
     selectedIndices: ReadonlySet<number>,
     currentAnimationElapsedMs: number,
     currentSpeed: number,
@@ -464,6 +465,7 @@ export class CircuitCanvasRenderer {
         currentSpeed
       );
     });
+    this.drawPosts(context, postDrawList);
 
     if (selectionBox !== null) {
       const start = this.modelToScreen(selectionBox.start);
@@ -828,7 +830,6 @@ export class CircuitCanvasRenderer {
       this.drawGenericElement(context, element, post1, post2);
     }
 
-    this.drawPosts(context, element);
     if (selected) {
       this.drawSelection(context, element);
     }
@@ -4814,12 +4815,12 @@ export class CircuitCanvasRenderer {
 
   private drawPosts(
     context: CanvasRenderingContext2D,
-    element: CircuitElm
+    postDrawList: ReadonlyArray<Readonly<Point>>
   ): void {
     context.save();
     context.fillStyle = this.foregroundColor();
-    for (let index = 0; index < element.getPostCount(); index += 1) {
-      const point = this.modelToScreen(element.getPost(index));
+    for (const post of postDrawList) {
+      const point = this.modelToScreen(post);
       context.beginPath();
       context.arc(point.x, point.y, 2.8, 0, Math.PI * 2);
       context.fill();

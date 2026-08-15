@@ -4427,6 +4427,7 @@ export class NativeCircuitApp {
       width,
       height,
       this.runner.elements,
+      this.runner.getPostDrawList(),
       this.selectedIndices,
       currentAnimationElapsedMs,
       this.currentSpeed,
