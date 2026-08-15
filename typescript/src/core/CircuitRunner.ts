@@ -86,6 +86,47 @@ export interface CircuitScopePlot {
 }
 
 /**
+ * Serialized state owned by one legacy Scope.  Drawing/recording is still
+ * being migrated, but import must never discard controls the native renderer
+ * does not yet implement (manual scale, XY channels, trigger and trails).
+ */
+export interface CircuitScopeState {
+  scopeId: number;
+  position: number;
+  speed: number;
+  flags: number;
+  manualDivisions: number;
+  text: string | null;
+  voltageScale: number | null;
+  currentScale: number | null;
+  /** Per-plot values needed by manual scale and AC coupling controls. */
+  plots: Array<{
+    elementIndex: number;
+    value: number;
+    flags: number;
+    scale: number | null;
+    manualScale: number | null;
+    manualPosition: number | null;
+  }>;
+  plot2d: {
+    enabled: boolean;
+    xy: boolean;
+    x: number;
+    y: number;
+    brightness: number;
+    red: number;
+    green: number;
+    blue: number;
+    trailPersistence: number;
+  };
+  trigger: { mode: number; edge: number; level: number } | null;
+  /** Original record used for lossless no-op Text export. */
+  rawText?: string;
+  /** Original XML record used for lossless no-op XML export. */
+  rawXml?: XmlRecord;
+}
+
+/**
  * Native TypeScript circuit execution layer.
  *
  * It keeps the original analyzeCircuit/runCircuit naming and MNA lifecycle,
@@ -101,6 +142,7 @@ export class CircuitRunner {
   public analyzed = false;
   public scopeElementIndices: number[] = [];
   public scopePlots: CircuitScopePlot[] = [];
+  public scopeStates: CircuitScopeState[] = [];
   public sourceFormat: "text" | "xml" = "text";
   public preservedTextRecords: string[] = [];
   public preservedXmlRecords: XmlRecord[] = [];
@@ -198,6 +240,11 @@ export class CircuitRunner {
           Number.isFinite(plot.elementIndex) &&
           Number.isFinite(plot.value)
       );
+    runner.scopeStates = document.records
+      .filter(
+        (record): record is CircuitScopeRecord => record.kind === "scope"
+      )
+      .map((record, scopeId) => CircuitRunner.parseTextScopeState(record, scopeId));
     return runner;
   }
 
@@ -297,7 +344,156 @@ export class CircuitRunner {
           Number.isFinite(plot.elementIndex) &&
           Number.isFinite(plot.value)
       );
+    runner.scopeStates = document.records
+      .filter((record) => record.kind === "scope")
+      .map((record, scopeId) => CircuitRunner.parseXmlScopeState(record, scopeId));
     return runner;
+  }
+
+  private static parseScopeFlags(value: string | undefined): number {
+    if (value === undefined) return 0;
+    if (value.startsWith("x")) return Number.parseInt(value.slice(1), 16);
+    return Number.parseInt(value, 10);
+  }
+
+  private static scopeState(
+    scopeId: number,
+    position: number,
+    speed: number,
+    flags: number,
+    voltageScale: number | null,
+    currentScale: number | null
+  ): CircuitScopeState {
+    return {
+      scopeId,
+      position: Number.isFinite(position) ? Math.max(0, position) : 0,
+      speed: Number.isFinite(speed) ? speed : 64,
+      flags: Number.isFinite(flags) ? flags : 0,
+      manualDivisions: 8,
+      text: null,
+      voltageScale,
+      currentScale,
+      plots: [],
+      plot2d: {
+        enabled: (flags & 64) !== 0,
+        xy: (flags & 128) !== 0,
+        x: 0,
+        y: 1,
+        brightness: -1,
+        red: -1,
+        green: -1,
+        blue: -1,
+        trailPersistence: 1
+      },
+      trigger: null
+    };
+  }
+
+  private static parseTextScopeState(
+    record: CircuitScopeRecord,
+    scopeId: number
+  ): CircuitScopeState {
+    const args = record.arguments;
+    const flags = CircuitRunner.parseScopeFlags(args[3]);
+    const state = CircuitRunner.scopeState(
+      scopeId,
+      Number.parseInt(args[6] ?? "0", 10),
+      Number.parseInt(args[1] ?? "64", 10),
+      flags,
+      CircuitRunner.positiveNumber(args[4]),
+      CircuitRunner.positiveNumber(args[5])
+    );
+    // New-style records put the scope's plot count at field 7.  The optional
+    // division value follows it only for manual-scale records.
+    if ((flags & 4096) !== 0 && (flags & (1 << 21)) !== 0) {
+      state.manualDivisions = Number.parseInt(args[8] ?? "8", 10) || 8;
+    }
+    const plotCount = (flags & 4096) !== 0
+      ? Math.max(1, Number.parseInt(args[7] ?? "1", 10))
+      : 1;
+    let cursor = 8;
+    if ((flags & (1 << 21)) !== 0) cursor += 1;
+    for (let index = 0; index < plotCount; index += 1) {
+      const plotFlags = (flags & (1 << 18)) !== 0
+        ? CircuitRunner.parseScopeFlags(args[cursor++])
+        : 0;
+      const elementIndex = index === 0
+        ? Number.parseInt(args[0] ?? "-1", 10)
+        : Number.parseInt(args[cursor++] ?? "-1", 10);
+      const value = index === 0
+        ? Number.parseInt(args[2] ?? "0", 10)
+        : Number.parseInt(args[cursor++] ?? "0", 10);
+      let manualScale: number | null = null;
+      let manualPosition: number | null = null;
+      if ((flags & (1 << 19)) !== 0) {
+        manualScale = CircuitRunner.positiveNumber(args[cursor++]);
+        manualPosition = Number.parseInt(args[cursor++] ?? "", 10);
+        if (!Number.isFinite(manualPosition)) manualPosition = null;
+      }
+      state.plots.push({
+        elementIndex,
+        value,
+        flags: plotFlags,
+        scale: value === 3 ? state.currentScale : state.voltageScale,
+        manualScale,
+        manualPosition
+      });
+    }
+    // Text after the structured fields is a user label.  Keep rawText as the
+    // authoritative round-trip representation until an edit changes the scope.
+    state.rawText = record.raw;
+    return state;
+  }
+
+  private static parseXmlScopeState(record: XmlRecord, scopeId: number): CircuitScopeState {
+    const flags = CircuitRunner.parseScopeFlags(record.attributes.f);
+    const first = record.children.find((child) => child.tagName === "p");
+    const state = CircuitRunner.scopeState(
+      scopeId,
+      Number.parseInt(record.attributes.p ?? "0", 10),
+      Number.parseInt(record.attributes.sp ?? "64", 10),
+      flags,
+      CircuitRunner.positiveNumber(first?.attributes.sc),
+      null
+    );
+    state.manualDivisions = Number.parseInt(record.attributes.md ?? "8", 10) || 8;
+    state.text = record.attributes.x ?? null;
+    state.plot2d.x = Number.parseInt(record.attributes.xy2x ?? "0", 10) || 0;
+    state.plot2d.y = Number.parseInt(record.attributes.xy2y ?? "1", 10) || 1;
+    state.plot2d.brightness = Number.parseInt(record.attributes.xy2br ?? "-1", 10);
+    state.plot2d.red = Number.parseInt(record.attributes.xy2r ?? "-1", 10);
+    state.plot2d.green = Number.parseInt(record.attributes.xy2g ?? "-1", 10);
+    state.plot2d.blue = Number.parseInt(record.attributes.xy2b ?? "-1", 10);
+    state.plot2d.trailPersistence = Number.parseInt(record.attributes.tp ?? "1", 10) || 1;
+    if (record.attributes.triggerMode !== undefined) {
+      state.trigger = {
+        mode: Number.parseInt(record.attributes.triggerMode, 10),
+        edge: Number.parseInt(record.attributes.triggerEdge ?? "0", 10),
+        level: Number(record.attributes.triggerLevel ?? "0")
+      };
+    }
+    state.plots = record.children
+      .filter((child) => child.tagName === "p")
+      .map((child) => ({
+        elementIndex: Number.parseInt(
+          child.attributes.e ?? record.attributes.en ?? "-1",
+          10
+        ),
+        value: Number.parseInt(child.attributes.v ?? "0", 10),
+        flags: CircuitRunner.parseScopeFlags(child.attributes.f),
+        scale: CircuitRunner.positiveNumber(child.attributes.sc),
+        manualScale: CircuitRunner.positiveNumber(child.attributes.ms),
+        manualPosition: child.attributes.mp === undefined
+          ? null
+          : Number.parseInt(child.attributes.mp, 10)
+      }));
+    state.rawXml = record;
+    return state;
+  }
+
+  private static positiveNumber(value: string | undefined): number | null {
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0 ? number : null;
   }
 
   private static parseTextScopePlots(
@@ -307,7 +503,7 @@ export class CircuitRunner {
     const args = record.arguments;
     const elementIndex = Number.parseInt(args[0] ?? "", 10);
     const value = Number.parseInt(args[2] ?? "0", 10);
-    const flags = Number.parseInt(args[3] ?? "0", 10);
+    const flags = CircuitRunner.parseScopeFlags(args[3]);
     const voltageScale = Number(args[4] ?? "0");
     const currentScale = Number(args[5] ?? "0");
     const panel = Number.parseInt(args[6] ?? "0", 10);
@@ -328,8 +524,13 @@ export class CircuitRunner {
     if (!hasExplicitPlots) return plots;
     const plotCount = Math.max(1, Number.parseInt(args[7] ?? "1", 10));
     let cursor = 8;
-    for (let index = 1; index < plotCount; index += 1) {
+    if ((flags & (1 << 21)) !== 0) cursor += 1;
+    for (let index = 0; index < plotCount; index += 1) {
       if ((flags & (1 << 18)) !== 0) cursor += 1;
+      if (index === 0) {
+        if ((flags & (1 << 19)) !== 0) cursor += 2;
+        continue;
+      }
       const nextElement = Number.parseInt(args[cursor] ?? "", 10);
       const nextValue = Number.parseInt(args[cursor + 1] ?? "0", 10);
       cursor += 2;
@@ -343,6 +544,7 @@ export class CircuitRunner {
         scale: scaleFor(nextValue),
         scopeId
       });
+      if ((flags & (1 << 19)) !== 0) cursor += 2;
     }
     return plots;
   }

@@ -37,7 +37,8 @@ import {
   VoltageElm,
   VarRailElm,
   WireElm,
-  type XmlRecord
+  type XmlRecord,
+  type CircuitScopeState
 } from "../core";
 import {
   circuitExamples,
@@ -312,6 +313,9 @@ interface ScopeChannel {
   scale: number | null;
   samples: number[];
   read: () => number;
+  /** Scope record that created this plot; survives combine → separate. */
+  sourceScopeId: number;
+  sourceScopeState: CircuitScopeState;
 }
 
 /** App-layer counterpart of legacy ScopeManager's Scope array. */
@@ -319,6 +323,18 @@ interface ScopeGroup {
   scopeId: number;
   panel: number;
   plots: ScopeChannel[];
+  state: CircuitScopeState;
+  /** Original plot ownership; lets an untouched/position-only scope round-trip losslessly. */
+  sourcePlotKey: string;
+}
+
+interface ScopeRectangle {
+  scopeId: number;
+  position: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 }
 
 export interface NativeCircuitApi {
@@ -362,6 +378,8 @@ export interface VisualRegressionLayout {
   scopeY: number;
   toolbarVisible: boolean;
   viewport: { scale: number; offsetX: number; offsetY: number };
+  scopeInfoWidth: number;
+  scopeRects: ScopeRectangle[];
 }
 
 export interface DynamicCircuitElementSnapshot {
@@ -462,6 +480,8 @@ export class NativeCircuitApp {
   private history: string[] = [];
   private historyIndex = -1;
   private scopeGroups: ScopeGroup[] = [];
+  /** Pre-combine records; intentionally app-owned rather than serialized. */
+  private scopeSeparationBackup: ScopeGroup[] | null = null;
   private heldMomentarySwitch: SwitchElm | null = null;
   /** Legacy CustomCompositeElm remembers the most recently chosen model. */
   private lastDrawSubcircuitModel: string | null = null;
@@ -545,7 +565,11 @@ export class NativeCircuitApp {
         ? initialDocument.flags
         : new CircuitLoader().readCircuitFlags(initialDocument.options.flags)
     );
-    this.applyCircuitControls(initialDocument.options);
+    this.applyCircuitControls(
+      initialDocument.format === "text"
+        ? initialDocument.options
+        : initialDocument.options
+    );
     this.api = {
       loadCircuit: (source) => this.loadCircuit(source),
       exportCircuit: () => this.serializeCircuit(),
@@ -602,6 +626,7 @@ export class NativeCircuitApp {
       : CircuitRunner.fromText(source);
     nextRunner.analyzeCircuit();
     this.runner = nextRunner;
+    this.scopeSeparationBackup = null;
     this.currentCircuitTitle =
       circuitExamples.find((example) => example.source.trim() === source.trim())
         ?.name ?? "";
@@ -784,7 +809,9 @@ export class NativeCircuitApp {
       // workspace so callers crop no fictitious bottom panel.
       scopeY: this.hasScopes() ? scope.top : box.bottom,
       toolbarVisible: toolbar !== null && !toolbar.classList.contains("hidden"),
-      viewport: { ...this.renderer.viewport }
+      viewport: { ...this.renderer.viewport },
+      scopeInfoWidth: this.scopeLayout(scope.width, scope.height).infoWidth,
+      scopeRects: this.scopeLayout(scope.width, scope.height).rects
     };
   }
 
@@ -1977,6 +2004,8 @@ export class NativeCircuitApp {
     const element = this.runner.elements[this.selectedIndex];
     const colors = ["#f1e900", "#00d83b", "#20a7ff", "#fb7185", "#c084fc"];
     const panel = Math.max(-1, ...this.scopeGroups.map((group) => group.panel)) + 1;
+    const scopeId = this.nextScopeId();
+    const state = { ...this.newScopeState(panel), scopeId };
     const plot: ScopeChannel = {
       elementIndex: this.selectedIndex,
       value: 0,
@@ -1986,9 +2015,17 @@ export class NativeCircuitApp {
       color: colors[this.scopeGroups.length % colors.length],
       scale: null,
       samples: [],
-      read: () => element.getVoltageDiff()
+      read: () => element.getVoltageDiff(),
+      sourceScopeId: scopeId,
+      sourceScopeState: state
     };
-    this.scopeGroups.push({ scopeId: this.nextScopeId(), panel, plots: [plot] });
+    this.scopeGroups.push({
+      scopeId,
+      panel,
+      plots: [plot],
+      state,
+      sourcePlotKey: ""
+    });
     this.syncScopePlots();
     this.syncScopeLayout();
     this.syncOptionButtons();
@@ -2251,6 +2288,10 @@ export class NativeCircuitApp {
     if (this.scopeCount() < 2) return;
     const [first, ...rest] = this.scopeGroups;
     if (first === undefined) return;
+    this.scopeSeparationBackup = this.scopeGroups.map((group) => ({
+      ...group,
+      plots: [...group.plots]
+    }));
     for (const group of rest) first.plots.push(...group.plots);
     this.scopeGroups = [first];
     this.syncScopePlots();
@@ -2259,18 +2300,59 @@ export class NativeCircuitApp {
 
   private separateAllScopes(): void {
     if (!this.scopeGroups.some((group) => group.plots.length > 1)) return;
-    const groups: ScopeGroup[] = [];
-    for (const group of this.scopeGroups) {
-      for (const plot of group.plots) {
+    const backup = this.scopeGroups.length === 1 ? this.scopeSeparationBackup : null;
+    if (backup !== null) {
+      this.scopeGroups = backup.map((group, position) => ({
+        ...group,
+        panel: position
+      }));
+      this.scopeSeparationBackup = null;
+      this.syncScopePlots();
+      this.syncOptionButtons();
+      return;
+    }
+    // A combined Scope retains every channel's original Scope record.  The
+    // legacy action must therefore restore that record's flags/scales/XY and
+    // trigger state, not synthesize a default Scope around the channel.
+    const bySource = new Map<number, ScopeChannel[]>();
+    for (const plot of this.scopeGroups.flatMap((group) => group.plots)) {
+      const channels = bySource.get(plot.sourceScopeId) ?? [];
+      channels.push(plot);
+      bySource.set(plot.sourceScopeId, channels);
+    }
+    if (bySource.size > 1) {
+      this.scopeGroups = [...bySource.entries()].map(
+        ([scopeId, plots], position) => ({
+          scopeId,
+          panel: position,
+          plots,
+          state: plots[0]?.sourceScopeState ?? this.newScopeState(position),
+          sourcePlotKey: this.scopePlotKey(plots)
+        })
+      );
+    } else {
+      // A saved *combined* legacy record has one owner by definition.  Keep
+      // ScopePopupMenu's historical V/I-pair split behavior after reload;
+      // the lossless advanced-state branch above handles an in-memory
+      // combine→separate operation before it is exported.
+      const groups: ScopeGroup[] = [];
+      for (const plot of this.scopeGroups.flatMap((group) => group.plots)) {
         const previous = groups[groups.length - 1];
         if (previous !== undefined && this.isVoltageCurrentPair(previous.plots, plot)) {
           previous.plots.push(plot);
-        } else {
-          groups.push({ scopeId: groups.length, panel: groups.length, plots: [plot] });
+          continue;
         }
+        const position = groups.length;
+        groups.push({
+          scopeId: position,
+          panel: position,
+          plots: [plot],
+          state: { ...plot.sourceScopeState, rawText: undefined, rawXml: undefined },
+          sourcePlotKey: ""
+        });
       }
+      this.scopeGroups = groups;
     }
-    this.scopeGroups = groups;
     this.syncScopePlots();
     this.syncOptionButtons();
   }
@@ -2306,6 +2388,40 @@ export class NativeCircuitApp {
         scopeId: group.scopeId
       }))
     );
+    this.runner.scopeStates = this.scopeGroups.map((group) => ({
+      ...group.state,
+      position: group.panel
+    }));
+  }
+
+  private newScopeState(position: number): CircuitScopeState {
+    return {
+      scopeId: this.nextScopeId(),
+      position,
+      speed: 64,
+      flags: 4096,
+      manualDivisions: 8,
+      text: null,
+      voltageScale: null,
+      currentScale: null,
+      plots: [],
+      plot2d: {
+        enabled: false,
+        xy: false,
+        x: 0,
+        y: 1,
+        brightness: -1,
+        red: -1,
+        green: -1,
+        blue: -1,
+        trailPersistence: 1
+      },
+      trigger: null
+    };
+  }
+
+  private scopePlotKey(plots: readonly ScopeChannel[]): string {
+    return plots.map((plot) => `${plot.elementIndex}:${plot.value}`).join(",");
   }
 
   private isVoltageCurrentPair(existing: ScopeChannel[], plot: ScopeChannel): boolean {
@@ -3742,12 +3858,28 @@ export class NativeCircuitApp {
     const scopeRecords = this.scopeGroups.map((group) => {
       const first = group.plots[0];
       if (first === undefined) return "";
+      if (
+        group.state.rawText !== undefined &&
+        group.sourcePlotKey === this.scopePlotKey(group.plots)
+      ) {
+        const fields = group.state.rawText.trim().split(/\s+/);
+        const flagToken = fields[4] ?? "0";
+        const flags = flagToken.startsWith("x")
+          ? Number.parseInt(flagToken.slice(1), 16)
+          : Number.parseInt(flagToken, 10);
+        // All current text scopes use the structured (FLAG_PLOTS) form; patch
+        // only position so every unimplemented legacy field remains byte-for-byte.
+        if ((flags & 4096) !== 0 && fields.length > 7) {
+          fields[7] = String(group.panel);
+          return fields.join(" ");
+        }
+      }
       const hasMultiplePlots = group.plots.length > 1;
-      const flags = hasMultiplePlots ? 4096 : 0;
+      const flags = group.state.flags | (hasMultiplePlots ? 4096 : 0);
       const voltageScale = group.plots.find((plot) => plot.value !== 3)?.scale ?? 0;
       const currentScale = group.plots.find((plot) => plot.value === 3)?.scale ?? 0;
       return [
-        "o", first.elementIndex, 64, first.value, flags, voltageScale,
+        "o", first.elementIndex, group.state.speed, first.value, flags, voltageScale,
         currentScale, group.panel,
         ...(hasMultiplePlots ? [group.plots.length, ...group.plots.slice(1).flatMap((plot) => [plot.elementIndex, plot.value])] : [])
       ].join(" ");
@@ -3815,9 +3947,23 @@ export class NativeCircuitApp {
     for (const group of this.scopeGroups) {
       const first = group.plots[0];
       if (first === undefined) continue;
+      if (
+        group.state.rawXml !== undefined &&
+        group.sourcePlotKey === this.scopePlotKey(group.plots)
+      ) {
+        const preserved = this.xmlRecordToElement(document, {
+          ...group.state.rawXml,
+          attributes: { ...group.state.rawXml.attributes, p: String(group.panel) }
+        });
+        root.append(preserved);
+        continue;
+      }
       const scope = document.createElement("o");
       scope.setAttribute("en", String(first.elementIndex));
       scope.setAttribute("p", String(group.panel));
+      scope.setAttribute("sp", String(group.state.speed));
+      scope.setAttribute("f", `x${group.state.flags.toString(16)}`);
+      if (group.state.text !== null) scope.setAttribute("x", group.state.text);
       for (const plot of group.plots) {
         const child = document.createElement("p");
         child.setAttribute("e", String(plot.elementIndex));
@@ -4081,10 +4227,12 @@ export class NativeCircuitApp {
         ...plot,
         element: this.runner.elements[plot.elementIndex]
       }))
-      .filter((plot) => plot.element !== undefined)
-      .filter((plot) => plot.panel < 3);
+      .filter((plot) => plot.element !== undefined);
     if (scopedPlots.length > 0) {
       const plots = scopedPlots.map((plot) => {
+        const sourceScopeState = this.runner.scopeStates.find(
+          (state) => state.scopeId === plot.scopeId
+        ) ?? this.newScopeState(plot.panel);
         const className = plot.element
           .getClassName()
           .replace(/Elm$/, "");
@@ -4099,7 +4247,9 @@ export class NativeCircuitApp {
             color: "#00d83b",
             scale: plot.scale,
             samples: [],
-            read: () => plot.element.getCurrent()
+            read: () => plot.element.getCurrent(),
+            sourceScopeId: plot.scopeId,
+            sourceScopeState
           };
         }
         if (plot.value === 7) {
@@ -4112,7 +4262,9 @@ export class NativeCircuitApp {
             color: "#20a7ff",
             scale: plot.scale,
             samples: [],
-            read: () => plot.element.getPower()
+            read: () => plot.element.getPower(),
+            sourceScopeId: plot.scopeId,
+            sourceScopeState
           };
         }
         return {
@@ -4124,13 +4276,30 @@ export class NativeCircuitApp {
           color: "#f1e900",
           scale: plot.scale,
           samples: [],
-          read: () => plot.element.getVoltageDiff()
+          read: () => plot.element.getVoltageDiff(),
+          sourceScopeId: plot.scopeId,
+          sourceScopeState
         };
       });
-      this.scopeGroups = [...new Map(scopedPlots.map((plot) => [
-        plot.scopeId,
-        { scopeId: plot.scopeId, panel: plot.panel, plots: plots.filter((_, index) => scopedPlots[index]?.scopeId === plot.scopeId) }
-      ])).values()];
+      const channelsByScope = new Map<number, ScopeChannel[]>();
+      scopedPlots.forEach((plot, index) => {
+        const channels = channelsByScope.get(plot.scopeId) ?? [];
+        const channel = plots[index];
+        if (channel !== undefined) channels.push(channel);
+        channelsByScope.set(plot.scopeId, channels);
+      });
+      this.scopeGroups = [...channelsByScope.entries()].map(([scopeId, channels]) => {
+        const source = scopedPlots.find((plot) => plot.scopeId === scopeId);
+        const state = this.runner.scopeStates.find((item) => item.scopeId === scopeId) ??
+          this.newScopeState(source?.panel ?? 0);
+        return {
+          scopeId,
+          panel: state.position,
+          plots: channels,
+          state,
+          sourcePlotKey: this.scopePlotKey(channels)
+        };
+      });
       this.syncScopeLayout();
       this.syncOptionButtons();
       return;
@@ -4237,6 +4406,33 @@ export class NativeCircuitApp {
     }
   }
 
+  /** Pure counterpart of ScopeManager.setupScopes, shared by rendering/tests. */
+  private scopeLayout(width: number, height: number): {
+    columnCount: number;
+    infoWidth: number;
+    panelWidth: number;
+    rects: ScopeRectangle[];
+  } {
+    const columnCount = Math.max(1, ...this.scopeGroups.map((group) => group.panel + 1));
+    const infoWidth = columnCount <= 2 ? 240 : 160;
+    const panelWidth = Math.max(20, (width - infoWidth) / columnCount);
+    const margin = 10;
+    const rects: ScopeRectangle[] = [];
+    for (let position = 0; position < columnCount; position += 1) {
+      const groups = this.scopeGroups.filter((group) => group.panel === position);
+      const rowHeight = height / Math.max(1, groups.length);
+      groups.forEach((group, row) => rects.push({
+        scopeId: group.scopeId,
+        position,
+        x: position * panelWidth,
+        y: row * rowHeight,
+        width: panelWidth - margin,
+        height: rowHeight
+      }));
+    }
+    return { columnCount, infoWidth, panelWidth, rects };
+  }
+
   private renderScopes(
     context: CanvasRenderingContext2D,
     width: number,
@@ -4245,14 +4441,19 @@ export class NativeCircuitApp {
     context.clearRect(0, 0, width, height);
     context.fillStyle = this.renderer.whiteBackground ? "#ffffff" : "#101010";
     context.fillRect(0, 0, width, height);
-    const panelCount = Math.max(1, ...this.scopeGroups.map((group) => group.panel + 1));
-    const panelWidth = width / panelCount;
+    // ScopeManager.setupScopes reserves CirSim.infoWidth at the right.  With
+    // one or two scope columns it grows to 240px; three or more retain 160px.
+    // Individual scopes are stacked inside their persisted `position` column.
+    const { columnCount, panelWidth, rects } = this.scopeLayout(width, height);
+    const rectangles = new Map(
+      this.scopeGroups.map((group) => [group, rects.find((rect) => rect.scopeId === group.scopeId)])
+    );
 
-    for (let panel = 0; panel < panelCount; panel += 1) {
+    for (let panel = 0; panel < columnCount; panel += 1) {
       const x = panel * panelWidth;
       context.save();
       context.beginPath();
-      context.rect(x, 0, panelWidth, height);
+      context.rect(x, 0, panelWidth - 10, height);
       context.clip();
       context.strokeStyle = this.renderer.whiteBackground
         ? "#d1d5db"
@@ -4260,7 +4461,7 @@ export class NativeCircuitApp {
       context.lineWidth = 1;
       context.beginPath();
       context.moveTo(x, height / 2);
-      context.lineTo(x + panelWidth, height / 2);
+      context.lineTo(x + panelWidth - 10, height / 2);
       context.stroke();
       if (panel > 0) {
         context.beginPath();
@@ -4272,11 +4473,12 @@ export class NativeCircuitApp {
     }
 
     this.scopeGroups.forEach((group) => group.plots.forEach((channel, channelIndex) => {
-      const panel = group.panel;
-      const x = panel * panelWidth;
+      const rect = rectangles.get(group);
+      if (rect === undefined) return;
+      const { x, y, width: scopeWidth, height: scopeHeight } = rect;
       context.save();
       context.beginPath();
-      context.rect(x, 0, panelWidth, height);
+      context.rect(x, y, scopeWidth, scopeHeight);
       context.clip();
       const max = Math.max(
         1e-12,
@@ -4288,10 +4490,9 @@ export class NativeCircuitApp {
       channel.samples.forEach((sample, sampleIndex) => {
         const sampleX =
           x +
-          (sampleIndex / Math.max(channel.samples.length - 1, 1)) *
-            panelWidth;
+          (sampleIndex / Math.max(channel.samples.length - 1, 1)) * scopeWidth;
         const sampleY =
-          height / 2 - (sample / max) * (height * 0.38);
+          y + scopeHeight / 2 - (sample / max) * (scopeHeight * 0.38);
         if (sampleIndex === 0) {
           context.moveTo(sampleX, sampleY);
         } else {
@@ -4309,12 +4510,17 @@ export class NativeCircuitApp {
         context.fillText(
           label,
           x + 8,
-          17
+          y + 17
         );
-        context.fillText(channel.elementLabel, x + 8, 32);
+        context.fillText(channel.elementLabel, x + 8, y + 32);
       }
       context.restore();
     }));
+    context.fillStyle = this.renderer.whiteBackground ? "#111827" : "#f3f4f6";
+    context.font = "12px Arial";
+    const infoX = columnCount * panelWidth + 8;
+    context.fillText(`时间: ${CircuitElm.getUnitText(this.runner.simulation.t, "s")}`, infoX, 18);
+    context.fillText(`时间步长: ${CircuitElm.getUnitText(this.runner.simulation.timeStep, "s")}`, infoX, 34);
   }
 
   private updateInspector(): void {

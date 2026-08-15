@@ -2,7 +2,7 @@ export { CircuitElm } from "./CircuitElm";
 export { CircuitLoader } from "./CircuitLoader";
 export { CircuitRunner } from "./CircuitRunner";
 export type { CircuitStepResult } from "./CircuitRunner";
-export type { CircuitScopePlot } from "./CircuitRunner";
+export type { CircuitScopePlot, CircuitScopeState } from "./CircuitRunner";
 export type {
   CircuitDocument,
   CircuitElementRecord,
