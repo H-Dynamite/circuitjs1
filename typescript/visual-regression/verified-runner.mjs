@@ -11,6 +11,7 @@ const MENU_STRIP_GATE_ID = "3-cgand.txt", MENU_STRIP_MAE = 0.03;
 // The two UIManager buttons live above the workspace: the ordinary `right`
 // crop begins at the canvas origin and therefore cannot prove their parity.
 const RUN_CONTROLS_GATE_ID = "3-cgand.txt", RUN_CONTROLS_MAE = 0.07;
+const STATIC_CAPTURE_STEPS = 2;
 const MENU_CAPTURE_TIMEOUT_MS = 60_000;
 const MENUS = [
   ["file", "\u6587\u4ef6", "\u6587\u4ef6", "new"], ["edit", "\u7f16\u8f91", "\u7f16\u8f91", "undo"],
@@ -158,8 +159,8 @@ async function legacyLoad(page, baseUrl, id, source, runningControls = false) {
   const response = await requested; if (!response.ok()) throw new Error(`Legacy circuit request failed: ${response.status()} ${id}`);
   const actual = await response.text(); if (sha(actual) !== sha(source)) throw new Error(`Legacy source hash mismatch: ${id}`);
   await page.evaluate(() => {
-    // GWT exposes the animation control as a checkbox; leave every capture in
-    // the stopped state even when its implementation details change.
+    // Stop before changing the visual test layout; the runner resumes after
+    // the fixed-step capture contract completes.
     const pause = [...document.querySelectorAll("input[type=checkbox]")]
       .find((input) => /pause|stop/i.test(input.getAttribute("title") ?? ""));
     if (pause instanceof HTMLInputElement && !pause.checked) pause.click();
@@ -169,23 +170,24 @@ async function legacyLoad(page, baseUrl, id, source, runningControls = false) {
     window.CircuitJS1.setVisualRegressionLayout(174, 665, true);
   });
   await stableCanvas(page);
-  const legacyState = await page.evaluate((requireRunning) => {
+  const legacyState = await page.evaluate((fixedSteps) => {
     const bridge = window.CircuitJS1;
-    if (requireRunning) {
-      if (typeof bridge?.setSimRunning !== "function" || typeof bridge?.isRunning !== "function") {
-        throw new Error("Legacy run-controls gate requires setSimRunning() and isRunning() bridge methods");
-      }
-      bridge.setSimRunning(true);
+    if (typeof bridge?.setSimRunning !== "function" || typeof bridge?.isRunning !== "function" || typeof bridge?.stepSimulation !== "function") {
+      throw new Error("Legacy visual capture bridge missing simulation controls");
     }
+    bridge.setSimRunning(false);
+    bridge.stepSimulation(fixedSteps);
+    bridge.setSimRunning(true);
     return {
       layout: bridge?.getVisualRegressionLayout?.(),
-      running: typeof bridge?.isRunning === "function" ? bridge.isRunning() : null
+      running: bridge.isRunning(), fixedSteps,
+      simulationTime: typeof bridge?.getTime === "function" ? bridge.getTime() : null
     };
-  }, runningControls);
-  const { layout, running } = legacyState;
+  }, STATIC_CAPTURE_STEPS);
+  const { layout, running, fixedSteps, simulationTime } = legacyState;
   if (!visualLayoutStatus(layout)) throw new Error(`Invalid legacy visual layout: ${JSON.stringify(layout)}`);
-  if (runningControls && running !== true) throw new Error(`Legacy run-controls gate could not enter RUN state: ${JSON.stringify(legacyState)}`);
-  return { requestedPath: expectedPath, sourceSha256: sha(actual), paused: running === false, running, canvas: layout.canvas, visualLayout: layout };
+  if (running !== true || fixedSteps !== STATIC_CAPTURE_STEPS) throw new Error(`Legacy visual capture state mismatch: ${JSON.stringify(legacyState)}`);
+  return { requestedPath: expectedPath, sourceSha256: sha(actual), paused: false, running, fixedSteps, simulationTime, canvas: layout.canvas, visualLayout: layout };
 }
 function textElementsIn(source) {
   return source
@@ -240,17 +242,26 @@ async function tsLoad(page, baseUrl, source, runningControls = false) {
   });
   const visualLayout = await page.evaluate(() => window.CircuitJS1TS.getVisualRegressionLayout?.());
   if (!visualLayoutStatus(visualLayout)) throw new Error(`Invalid TypeScript visual layout: ${JSON.stringify(visualLayout)}`);
-  // Regular static captures stay paused for deterministic canvas pixels.
-  // UIManager's source screenshot exposes RUN/Stop, however, so the focused
-  // run-controls gate switches only the visible state after the canvas has
-  // already settled. This avoids relabelling a red STOP state as a visual
-  // regression against the legacy RUN state.
-  const running = await page.evaluate((requireRunning) => {
-    if (requireRunning) window.CircuitJS1TS.setRunning(true);
-    return window.CircuitJS1TS.getDynamicSnapshot().running;
-  }, runningControls);
-  if (runningControls && running !== true) throw new Error(`TypeScript run-controls gate could not enter RUN state: ${running}`);
-  return { inputSha256: sha(source), expectedElementCount, elementCountError, ...summary, exportedSha256: sha(exportedCircuit), paused: !running, running, canvas, visualLayout };
+  const captureState = await page.evaluate((fixedSteps) => {
+    const app = window.CircuitJS1TS;
+    if (typeof app?.setRunning !== "function" || typeof app?.stepSimulation !== "function" || typeof app?.getDynamicSnapshot !== "function") {
+      throw new Error("TypeScript visual capture bridge missing simulation controls");
+    }
+    app.setRunning(false);
+    const stepped = app.stepSimulation(fixedSteps);
+    app.setRunning(true);
+    const snapshot = app.getDynamicSnapshot();
+    return { running: snapshot.running, fixedSteps: stepped?.steps, simulationTime: snapshot.time };
+  }, STATIC_CAPTURE_STEPS);
+  if (captureState.running !== true || captureState.fixedSteps !== STATIC_CAPTURE_STEPS) throw new Error(`TypeScript visual capture state mismatch: ${JSON.stringify(captureState)}`);
+  return { inputSha256: sha(source), expectedElementCount, elementCountError, ...summary, exportedSha256: sha(exportedCircuit), paused: false, ...captureState, canvas, visualLayout };
+}
+function assertStaticCaptureState(legacy, ts) {
+  const state = { legacy: { running: legacy?.running, fixedSteps: legacy?.fixedSteps }, ts: { running: ts?.running, fixedSteps: ts?.fixedSteps } };
+  if (state.legacy.running !== true || state.ts.running !== true || state.legacy.fixedSteps !== STATIC_CAPTURE_STEPS || state.ts.fixedSteps !== STATIC_CAPTURE_STEPS) {
+    throw new Error(`Static visual capture requires both products RUN after ${STATIC_CAPTURE_STEPS} fixed steps; got ${JSON.stringify(state)}`);
+  }
+  return state;
 }
 async function popupGeometry(locator, label) {
   const box = await locator.boundingBox();
@@ -400,6 +411,7 @@ export async function run() {
           result.menu.legacy=await verifyMenu(menuLegacyPage,"legacy",entry,index);
           await shot(menuLegacyPage,files.legacy);
           result.source.ts=await tsLoad(menuTsPage,baseUrl,firstSource);
+          result.staticCaptureState=assertStaticCaptureState(result.source.legacy,result.source.ts);
           result.menu.ts=await verifyMenu(menuTsPage,"ts",entry,index);
           if (entry[0] === "file") {
             applyFilePopupMetric(result, result.menu.ts.popup);
@@ -414,7 +426,7 @@ export async function run() {
       finally { addMonitorFailures(result,[menuLegacyWatch,menuTsWatch]); await menuLegacyPage.close().catch(() => {}); await menuTsPage.close().catch(() => {}); }
       await writeFile(join(options.output,"metadata",`${nameFor(id)}.json`),JSON.stringify(result,null,2));results.push(result);console.log(`[${result.status}] menu ${entry[0]}`);
     }
-    for(const scenario of selected){const files=filesFor(options.output,nameFor(scenario.id)),old=options.keepOutput&&await previous(options.output,scenario.id,files);if(old){applyMenuStripGate(old,options.menuStripGate);applyRunControlsGate(old,options.runControlsGate);results.push(old);console.log(`[resumed] ${scenario.id}`);continue}const source=await readFile(scenario.file,"utf8"),result={id:scenario.id,status:"passed",captureStatus:"passed",files,error:undefined,source:{inputSha256:sha(source)}};legacyWatch.reset();tsWatch.reset();try{result.source.legacy=await legacyLoad(legacyPage,baseUrl,scenario.id,source,options.runControlsGate);await shot(legacyPage,files.legacy);result.source.ts=await tsLoad(tsPage,baseUrl,source,options.runControlsGate);result.runControlsState={legacy:result.source.legacy.running,ts:result.source.ts.running};await shot(tsPage,files.ts);result.baseline=comparableLayout(result.source.legacy.visualLayout,result.source.ts.visualLayout);if(options.diff){result.metrics=await diff(context,files.legacy,files.ts,files.diff);result.regionMetrics=await diffRegions(context,files,result.source.legacy.visualLayout,result.source.ts.visualLayout)}applyTsValidation(result);applyVisualOutcome(result,result.baseline.valid,Boolean(result.metrics&&(result.metrics.diffPixelRatio>REVIEW_DIFF_PIXEL_RATIO||result.metrics.mae>REVIEW_MAE)))}catch(error){result.status="failed";result.captureStatus="failed";result.error=errorText(error)}addMonitorFailures(result,[legacyWatch,tsWatch]);applyMenuStripGate(result,options.menuStripGate);applyRunControlsGate(result,options.runControlsGate);await writeFile(join(options.output,"metadata",`${nameFor(scenario.id)}.json`),JSON.stringify(result,null,2));results.push(result);console.log(`[${result.status}] ${scenario.id}`)}
+    for(const scenario of selected){const files=filesFor(options.output,nameFor(scenario.id)),old=options.keepOutput&&await previous(options.output,scenario.id,files);if(old){applyMenuStripGate(old,options.menuStripGate);applyRunControlsGate(old,options.runControlsGate);results.push(old);console.log(`[resumed] ${scenario.id}`);continue}const source=await readFile(scenario.file,"utf8"),result={id:scenario.id,status:"passed",captureStatus:"passed",files,error:undefined,source:{inputSha256:sha(source)}};legacyWatch.reset();tsWatch.reset();try{result.source.legacy=await legacyLoad(legacyPage,baseUrl,scenario.id,source,options.runControlsGate);await shot(legacyPage,files.legacy);result.source.ts=await tsLoad(tsPage,baseUrl,source,options.runControlsGate);result.staticCaptureState=assertStaticCaptureState(result.source.legacy,result.source.ts);result.runControlsState={legacy:result.source.legacy.running,ts:result.source.ts.running};await shot(tsPage,files.ts);result.baseline=comparableLayout(result.source.legacy.visualLayout,result.source.ts.visualLayout);if(options.diff){result.metrics=await diff(context,files.legacy,files.ts,files.diff);result.regionMetrics=await diffRegions(context,files,result.source.legacy.visualLayout,result.source.ts.visualLayout)}applyTsValidation(result);applyVisualOutcome(result,result.baseline.valid,Boolean(result.metrics&&(result.metrics.diffPixelRatio>REVIEW_DIFF_PIXEL_RATIO||result.metrics.mae>REVIEW_MAE)))}catch(error){result.status="failed";result.captureStatus="failed";result.error=errorText(error)}addMonitorFailures(result,[legacyWatch,tsWatch]);applyMenuStripGate(result,options.menuStripGate);applyRunControlsGate(result,options.runControlsGate);await writeFile(join(options.output,"metadata",`${nameFor(scenario.id)}.json`),JSON.stringify(result,null,2));results.push(result);console.log(`[${result.status}] ${scenario.id}`)}
   } finally { await context.close();await browser.close();await server.close(); }
   const summary={passed:results.filter((r)=>r.status==="passed").length,review:results.filter((r)=>r.status==="review").length,invalidBaseline:results.filter((r)=>r.status==="invalid-baseline").length,failed:results.filter((r)=>r.status==="failed").length}; const report={generatedAt:new Date().toISOString(),viewport:VIEWPORT,thresholds:{REVIEW_DIFF_PIXEL_RATIO,REVIEW_MAE,MENU_STRIP_MAE:options.menuStripGate?MENU_STRIP_MAE:undefined,RUN_CONTROLS_MAE:options.runControlsGate?RUN_CONTROLS_MAE:undefined},execution:{mode:options.runControlsGate?"run-controls-gate":options.menuStripGate?"menu-strip-gate":options.strict?"strict-gate":"review-collection",strict:options.strict,menuStripGate:options.menuStripGate,runControlsGate:options.runControlsGate,exitNonZeroWhen:options.strict?"review, invalid-baseline, or failed":"invalid-baseline or failed"},source:{totalScenarios:all.length,capturedScenarios:selected.length},summary,results}; await writeFile(join(options.output,"report.json"),JSON.stringify(report,null,2));await writeFile(join(options.output,"report.html"),html(results,options.output));console.log(`Report: ${join(options.output,"report.html")}`);if(summary.failed||summary.invalidBaseline||(options.strict&&summary.review))process.exitCode=1;
 }

@@ -720,7 +720,10 @@ button {
  * visual-regression harness) makes an empty circuit use its complete canvas.
  */
 .canvas-column.has-scopes {
-  grid-template-rows: minmax(220px, 1fr) 168px;
+  /* At the standard 1280×900 desktop viewport this leaves the same 665px
+   * main workspace as the original application, while retaining the visible
+   * scope panel in the remaining 165px. */
+  grid-template-rows: minmax(220px, 1fr) 165px;
   background: #050505;
 }
 

@@ -54,6 +54,9 @@ try {
   // state and performs the public export/reload compatibility check.
   const source = await (await page.request.get(`http://127.0.0.1:${address.port}/src/examples/circuits/555int.txt`)).text();
   await page.evaluate((text) => window.CircuitJS1TS.loadCircuit(text), source);
+  const scopedLayout = await page.evaluate(() => window.CircuitJS1TS.getVisualRegressionLayout());
+  assert.equal(scopedLayout.canvas.height, 665, "scopes retain the legacy-sized main workspace at the standard viewport");
+  assert.equal(scopedLayout.scopeY, 735, "scope panel starts after the legacy-sized main workspace");
   await openScopes();
   assert.deepEqual(panels(await state()), [0, 1], "fixture restores its original scope positions");
   assert.equal(await enabled("scope-stack"), true, "Stack enabled iff final scope position is nonzero");
