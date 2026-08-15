@@ -529,7 +529,7 @@ export class CircuitCanvasRenderer {
     context.save();
     context.lineCap = "round";
     context.lineJoin = "round";
-    context.lineWidth = selected ? 4 : 3;
+    context.lineWidth = (selected ? 4 : 3) * this.viewport.scale;
     context.strokeStyle = selected ? this.selectionColor : color;
     context.fillStyle = context.strokeStyle;
 
