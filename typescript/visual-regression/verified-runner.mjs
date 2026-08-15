@@ -199,7 +199,9 @@ async function legacyLoad(page, baseUrl, id, source, runningControls = false) {
   const { layout, running, fixedSteps, simulationTime, ...timeState } = legacyState;
   if (!visualLayoutStatus(layout)) throw new Error(`Invalid legacy visual layout: ${JSON.stringify(layout)}`);
   if (running !== true || fixedSteps !== STATIC_CAPTURE_STEPS) throw new Error(`Legacy visual capture state mismatch: ${JSON.stringify(legacyState)}`);
-  return { requestedPath: expectedPath, sourceSha256: sha(actual), paused: false, running, fixedSteps, simulationTime, ...timeState, canvas: layout.canvas, visualLayout: layout };
+  // An actually empty legacy circuit has no solver work and therefore
+  // legitimately leaves t at zero despite the fixed-step API call.
+  return { requestedPath: expectedPath, sourceSha256: sha(actual), expectedElementCount: textElementsIn(source), paused: false, running, fixedSteps, simulationTime, ...timeState, canvas: layout.canvas, visualLayout: layout };
 }
 function textElementsIn(source) {
   return source
@@ -291,14 +293,18 @@ function timeClose(left, right) {
 }
 function staticTimeParity(legacy, ts) {
   const products = { legacy, ts };
+  // Both products deliberately treat an empty circuit as a solver no-op.
+  // Require the same stable zero-time state rather than manufacturing time.
+  const quiescentEmptyCircuit = legacy.expectedElementCount === 0 && ts.expectedElementCount === 0;
   const perProduct = Object.fromEntries(Object.entries(products).map(([name, state]) => {
-    const expectedFinalTime = state.initialTime + STATIC_CAPTURE_STEPS * state.initialTimeStep;
+    const expectedFinalTime = state.initialTime + (quiescentEmptyCircuit ? 0 : STATIC_CAPTURE_STEPS * state.initialTimeStep);
     return [name, {
       initialTime: state.initialTime, initialTimeStep: state.initialTimeStep,
       finalTime: state.finalTime, finalTimeStep: state.finalTimeStep, expectedFinalTime,
       ticksMatch: state.fixedSteps === STATIC_CAPTURE_STEPS,
       startsAtZero: timeClose(state.initialTime, 0),
       fixedTimeStep: timeClose(state.initialTimeStep, state.finalTimeStep),
+      quiescentNoop: !quiescentEmptyCircuit || timeClose(state.finalTime, state.initialTime),
       elapsedMatchesTicks: timeClose(state.finalTime, expectedFinalTime),
       schedulerHeld: state.schedulerHeld === true
     }];
@@ -310,7 +316,7 @@ function staticTimeParity(legacy, ts) {
     timeStep: timeClose(legacy.initialTimeStep, ts.initialTimeStep),
     finalTime: timeClose(legacy.finalTime, ts.finalTime)
   };
-  return { passed: Object.values(checks).every(Boolean), checks, products: perProduct };
+  return { passed: Object.values(checks).every(Boolean), checks, quiescentEmptyCircuit, products: perProduct };
 }
 function applyStaticTimeParity(result) {
   result.staticTimeParity = staticTimeParity(result.source.legacy, result.source.ts);
