@@ -1,6 +1,8 @@
 import {
   AnalogMuxElm,
   AudioInputElm,
+  AudioOutputElm,
+  AUDIO_OUTPUT_NOT_READY_MESSAGE,
   BusLogicInputElm,
   CapacitorElm,
   CircuitElm,
@@ -556,6 +558,8 @@ export class NativeCircuitApp {
   private lastDrawSubcircuitModel: string | null = null;
   private lastFrameTime = performance.now();
   private errorMessage: string | null = null;
+  private lastAudioOutput: { blob: Blob; url: string } | null = null;
+  private lastAudioElement: HTMLAudioElement | null = null;
   private static readonly AUTOSAVE_KEY = "circuitjs1-ts-autosave";
 
   public constructor(private readonly root: HTMLElement) {
@@ -5724,6 +5728,46 @@ export class NativeCircuitApp {
         this.updateInspector();
       });
       container.append(button, fileInput);
+    } else if (element instanceof AudioOutputElm) {
+      const playButton = document.createElement("button");
+      playButton.type = "button";
+      playButton.className = "property-action";
+      playButton.dataset.action = "play-audio-output";
+      playButton.textContent = `▶ Play Audio${element.labelNum > 1 ? ` ${element.labelNum}` : ""}`;
+      playButton.addEventListener("click", () => {
+        const wav = element.createWavFile();
+        if (wav === null) {
+          window.alert(AUDIO_OUTPUT_NOT_READY_MESSAGE);
+          return;
+        }
+        const blob = new Blob([wav.buffer as ArrayBuffer], { type: "audio/wav" });
+        this.lastAudioElement?.pause();
+        if (this.lastAudioOutput !== null) URL.revokeObjectURL(this.lastAudioOutput.url);
+        const url = URL.createObjectURL(blob);
+        this.lastAudioOutput = { blob, url };
+        const audio = new Audio(url);
+        this.lastAudioElement = audio;
+        void audio.play().catch((error: unknown) => this.showError(error));
+        this.updateInspector();
+      });
+      container.append(playButton);
+
+      if (this.lastAudioOutput !== null) {
+        const downloadButton = document.createElement("button");
+        downloadButton.type = "button";
+        downloadButton.className = "property-action";
+        downloadButton.dataset.action = "download-audio-output";
+        downloadButton.textContent = "Download last played audio";
+        downloadButton.addEventListener("click", () => {
+          if (this.lastAudioOutput === null) return;
+          const now = new Date();
+          const pad = (value: number): string => String(value).padStart(2, "0");
+          const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-` +
+            `${pad(now.getHours())}${pad(now.getMinutes())}`;
+          this.downloadBlob(this.lastAudioOutput.blob, `audio-${stamp}.circuitjs.wav`);
+        });
+        container.append(downloadButton);
+      }
     } else if (element instanceof DataRecorderElm) {
       const button = document.createElement("button");
       button.type = "button";

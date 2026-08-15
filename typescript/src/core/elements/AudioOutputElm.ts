@@ -3,6 +3,28 @@ import { StringTokenizer } from "../StringTokenizer";
 import { XMLDeserializer } from "../XMLDeserializer";
 import { XMLSerializer } from "../XMLSerializer";
 
+export const AUDIO_OUTPUT_NOT_READY_MESSAGE =
+  "Audio data is not ready yet. Increase simulation speed to make data ready sooner.";
+
+const MINIMUM_PLAYBACK_SECONDS = 0.05;
+
+export function encodeAudioOutputWav(samples: Int16Array, samplingRate: number): Uint8Array {
+  const result = new Uint8Array(46 + samples.length * 2);
+  const view = new DataView(result.buffer);
+  const writeAscii = (offset: number, value: string): void => {
+    for (let index = 0; index < value.length; index += 1) result[offset + index] = value.charCodeAt(index);
+  };
+  writeAscii(0, "RIFF");
+  view.setUint32(4, samples.length * 2 + 15, true);
+  writeAscii(8, "WAVE"); writeAscii(12, "fmt ");
+  view.setUint32(16, 18, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+  view.setUint32(24, samplingRate, true); view.setUint32(28, samplingRate * 2, true);
+  view.setUint16(32, 2, true); view.setUint16(34, 16, true); view.setUint16(36, 0, true);
+  writeAscii(38, "data"); view.setUint32(42, samples.length * 2, true);
+  samples.forEach((sample, index) => view.setInt16(46 + index * 2, sample, true));
+  return result;
+}
+
 /** One-terminal simulation audio recorder. */
 export class AudioOutputElm extends CircuitElm {
   public duration = 1;
@@ -131,6 +153,37 @@ export class AudioOutputElm extends CircuitElm {
       ...this.data.slice(this.dataPtr),
       ...this.data.slice(0, this.dataPtr)
     ];
+  }
+
+  public getPlaybackSamples(): Int16Array | null {
+    const recorded = this.getRecordedSamples();
+    if (recorded.length * this.sampleStep < MINIMUM_PLAYBACK_SECONDS) return null;
+    let maximum = -Number.MAX_VALUE;
+    let minimum = Number.MAX_VALUE;
+    for (const sample of recorded) {
+      maximum = Math.max(maximum, sample);
+      minimum = Math.min(minimum, sample);
+    }
+    const adjustment = -(maximum + minimum) / 2;
+    const peak = maximum + adjustment;
+    if (!(peak > 0)) return new Int16Array(recorded.length);
+    const multiplier = (0.25 * 32766) / peak;
+    const fadeLength = Math.trunc(this.samplingRate / 20);
+    const fadeOut = recorded.length - fadeLength;
+    const fadeMultiplier = multiplier / fadeLength;
+    return Int16Array.from(recorded, (sample, index) => {
+      const fade = index < fadeLength
+        ? index * fadeMultiplier
+        : index > fadeOut
+          ? (recorded.length - index) * fadeMultiplier
+          : multiplier;
+      return Math.trunc((sample + adjustment) * fade);
+    });
+  }
+
+  public createWavFile(): Uint8Array | null {
+    const samples = this.getPlaybackSamples();
+    return samples === null ? null : encodeAudioOutputWav(samples, this.samplingRate);
   }
 
   private setDataCount(): void {

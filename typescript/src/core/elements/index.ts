@@ -9,7 +9,7 @@ export { AnalogSwitch2Elm } from "./AnalogSwitch2Elm";
 export { AndGateElm } from "./AndGateElm";
 export { AntennaElm } from "./AntennaElm";
 export { AudioInputElm } from "./AudioInputElm";
-export { AudioOutputElm } from "./AudioOutputElm";
+export { AUDIO_OUTPUT_NOT_READY_MESSAGE, AudioOutputElm, encodeAudioOutputWav } from "./AudioOutputElm";
 export { BoxElm } from "./BoxElm";
 export { BusLogicInputElm } from "./BusLogicInputElm";
 export { BusSplitterElm } from "./BusSplitterElm";
