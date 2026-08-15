@@ -220,30 +220,36 @@ export class CircuitCanvasRenderer {
       return;
     }
 
-    const xs = elements.flatMap((element) => [element.x, element.x2]);
-    const ys = elements.flatMap((element) => [element.y, element.y2]);
-    const minX = Math.min(...xs);
-    const maxX = Math.max(...xs);
-    const minY = Math.min(...ys);
-    const maxY = Math.max(...ys);
-    const circuitWidth = Math.max(maxX - minX, 160);
-    const circuitHeight = Math.max(maxY - minY, 120);
+    // Matches UIManager.centerCircuit() in the legacy application. Its
+    // bounds include each element's actual visual box (chips and composites
+    // can extend beyond x/y endpoints), and margins are added to the circuit
+    // rather than subtracted from the viewport.
+    let minX = 30_000;
+    let maxX = -30_000;
+    let minY = 30_000;
+    let maxY = -30_000;
+    for (const element of elements) {
+      minX = Math.min(minX, element.x, element.x2);
+      maxX = Math.max(maxX, element.x, element.x2);
+      minY = Math.min(minY, element.y, element.y2);
+      maxY = Math.max(maxY, element.y, element.y2);
+      const box = element.getBoundingBox();
+      minX = Math.min(minX, box.x);
+      maxX = Math.max(maxX, box.x + box.width);
+      minY = Math.min(minY, box.y);
+      maxY = Math.max(maxY, box.y + box.height);
+    }
+    const circuitWidth = maxX - minX;
+    const circuitHeight = maxY - minY;
     const scale = Math.min(
-      1.8,
-      Math.max(
-        0.45,
-        Math.min(
-          (Math.max(width, 320) - 140) / circuitWidth,
-          (Math.max(height, 240) - 110) / circuitHeight
-        )
-      )
+      width / (circuitWidth + 140),
+      height / (circuitHeight + 100),
+      1.5
     );
 
     this.viewport.scale = scale;
-    this.viewport.offsetX =
-      (width - (minX + maxX) * scale) / 2;
-    this.viewport.offsetY =
-      (height - (minY + maxY) * scale) / 2;
+    this.viewport.offsetX = (width - circuitWidth * scale) / 2 - minX * scale;
+    this.viewport.offsetY = (height - circuitHeight * scale) / 2 - minY * scale;
   }
 
   public modelToScreen(point: Point): { x: number; y: number } {

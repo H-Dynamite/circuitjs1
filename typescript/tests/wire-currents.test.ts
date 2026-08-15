@@ -106,6 +106,20 @@ describe("current dot animation", () => {
 });
 
 describe("switch interaction area", () => {
+  it("uses the legacy initial-centering geometry", () => {
+    const runner = CircuitRunner.fromText(
+      ["$ 1 0.000005 10 50 5", "w 0 0 100 50 0"].join("\n")
+    );
+    const renderer = new CircuitCanvasRenderer();
+    renderer.fit(runner.elements, 1106, 665);
+
+    // UIManager.centerCircuit(): min(view/(bounds + margin), 1.5).
+    expect(renderer.viewport.scale).toBe(1.5);
+    // WireElm's legacy-compatible bounding box is inclusive at both ends.
+    expect(renderer.viewport.offsetX).toBe(477.25);
+    expect(renderer.viewport.offsetY).toBe(294.25);
+  });
+
   it("includes both throws of an SPDT switch", () => {
     const switchElement = new Switch2Elm(
       0,
