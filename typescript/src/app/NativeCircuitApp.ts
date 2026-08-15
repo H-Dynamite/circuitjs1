@@ -4375,14 +4375,16 @@ export class NativeCircuitApp {
   }
 
   private exportCanvasSvg(): void {
-    const image = this.canvas.toDataURL("image/png");
-    const width = this.canvas.width;
-    const height = this.canvas.height;
-    const svg =
-      `<svg xmlns="http://www.w3.org/2000/svg" ` +
-      `width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">` +
-      `<image width="${width}" height="${height}" href="${image}"/>` +
-      "</svg>";
+    const context = this.canvas.getContext("2d");
+    if (context === null) {
+      this.showError(new Error("Canvas 2D context is unavailable"));
+      return;
+    }
+    const svg = this.renderer.exportSvg(
+      context,
+      this.runner.elements,
+      this.runner.getPostDrawList()
+    );
     this.downloadBlob(
       new Blob([svg], { type: "image/svg+xml;charset=utf-8" }),
       "circuit.svg"

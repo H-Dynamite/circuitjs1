@@ -86,6 +86,7 @@ import {
   TunnelDiodeElm,
   ZenerElm
 } from "../core";
+import { SvgCanvasContext } from "./SvgCanvasContext";
 
 export interface CircuitViewport {
   scale: number;
@@ -480,6 +481,52 @@ export class CircuitCanvasRenderer {
       this.line(context, this.crosshair.x, 0, this.crosshair.x, height);
       this.line(context, 0, this.crosshair.y, width, this.crosshair.y);
       context.restore();
+    }
+  }
+
+  public exportSvg(
+    measurementContext: CanvasRenderingContext2D,
+    elements: CircuitElm[],
+    postDrawList: ReadonlyArray<Readonly<Point>>
+  ): string {
+    let minX = 30_000, maxX = -30_000, minY = 30_000, maxY = -30_000;
+    for (const element of elements) {
+      const centeredText = (element as CircuitElm & { isCenteredText?: () => boolean }).isCenteredText?.() ?? false;
+      if (!centeredText) {
+        minX = Math.min(minX, element.x, element.x2);
+        maxX = Math.max(maxX, element.x, element.x2);
+      }
+      minY = Math.min(minY, element.y, element.y2);
+      maxY = Math.max(maxY, element.y, element.y2);
+      const box = element.getBoundingBox();
+      if (!centeredText) {
+        minX = Math.min(minX, box.x);
+        maxX = Math.max(maxX, box.x + box.width);
+      }
+      minY = Math.min(minY, box.y);
+      maxY = Math.max(maxY, box.y + box.height);
+    }
+    const circuitWidth = elements.length === 0 ? 0 : maxX - minX;
+    const circuitHeight = elements.length === 0 ? 0 : maxY - minY;
+    const width = Math.max(1, circuitWidth + 140);
+    const height = Math.max(1, circuitHeight + 100);
+    const context = new SvgCanvasContext(width, height, measurementContext);
+    const viewport = { ...this.viewport };
+    const showCurrent = this.showCurrent;
+    const crosshair = this.crosshair;
+    try {
+      this.fit(elements, width, height);
+      this.showCurrent = false;
+      this.crosshair = null;
+      this.render(
+        context as unknown as CanvasRenderingContext2D,
+        width, height, elements, postDrawList, new Set<number>(), 0, 0, null, null
+      );
+      return context.serialize();
+    } finally {
+      Object.assign(this.viewport, viewport);
+      this.showCurrent = showCurrent;
+      this.crosshair = crosshair;
     }
   }
 
