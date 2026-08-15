@@ -195,6 +195,12 @@ export abstract class ChipElm extends CircuitElm {
     this.bodyTop = y0 - this.cspc;
     this.bodyRight = this.bodyLeft + width;
     this.bodyBottom = this.bodyTop + height;
+    this.boundingBox.setBounds(
+      this.bodyLeft,
+      this.bodyTop,
+      this.bodyRight - this.bodyLeft + 1,
+      this.bodyBottom - this.bodyTop + 1
+    );
 
     for (const pin of this.pins) {
       const sideFlipXY = [
