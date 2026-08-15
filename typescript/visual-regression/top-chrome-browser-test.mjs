@@ -191,6 +191,24 @@ try {
     document.querySelector(".tool-bar")?.classList.remove("hidden");
   });
 
+  // UIManager.centerCircuit() reserves its default 20% scope band while a
+  // scope-less circuit is initially framed below 800px wide.  Use a tall
+  // circuit so height, rather than the 1.5 scale cap, proves that branch.
+  const tallCircuit = "$ 1 0.000005 10 50 5\nw 0 0 100 1000 0";
+  await page.setViewportSize({ width: 760, height: 600 });
+  await page.evaluate((source) => window.CircuitJS1TS.loadCircuit(source), tallCircuit);
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  const narrowViewport = await page.evaluate(() => window.CircuitJS1TS.getVisualRegressionLayout().viewport);
+  approximately(narrowViewport.scale, 424 / 1101, "narrow scope-less framing reserves the legacy scope band");
+  await page.setViewportSize({ width: 1000, height: 600 });
+  await page.evaluate(() => window.dispatchEvent(new Event("resize")));
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  const wideViewport = await page.evaluate(() => window.CircuitJS1TS.getVisualRegressionLayout().viewport);
+  approximately(wideViewport.scale, 530 / 1101, "wide framing stops reserving the narrow scope band");
+  await page.setViewportSize(CASES[0].viewport);
+  await page.evaluate((source) => window.CircuitJS1TS.loadCircuit(source), baselineCircuit);
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+
   // Exercise the visible controls rather than app-private state: Toolbar.java
   // returns to Select on a repeated tool click, and UIManager switches the
   // Run/Stop emphasis on every click.

@@ -842,6 +842,19 @@ button {
   font-family: Consolas, monospace;
 }
 
+.current-circuit-summary {
+  display: grid;
+  gap: 3px;
+  margin: 8px 0 13px;
+  color: #000;
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+#current-circuit-title {
+  overflow-wrap: anywhere;
+}
+
 .panel-rule {
   height: 1px;
   margin: 12px 0;

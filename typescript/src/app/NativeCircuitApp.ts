@@ -355,6 +355,7 @@ export interface VisualRegressionLayout {
   sidebarX: number;
   scopeY: number;
   toolbarVisible: boolean;
+  viewport: { scale: number; offsetX: number; offsetY: number };
 }
 
 export interface DynamicCircuitElementSnapshot {
@@ -423,8 +424,14 @@ export class NativeCircuitApp {
   private activeTool: Tool = "select";
   private dragMode: "selected" | "all" | "row" | "column" | "post" =
     "selected";
-  private stepsPerFrame = 24;
+  /** Mirrors UIManager.speedBar (0..260), whose value is serialized in `$`. */
+  private simulationSpeed = 117;
+  private stepsPerFrame = NativeCircuitApp.iterationsForSpeed(117);
   private currentSpeed = 50;
+  /** Mirrors UIManager.powerBar (1..100). */
+  private powerBrightness = 50;
+  /** UIManager's titleLabel starts as this until a menu example supplies one. */
+  private currentCircuitTitle = "Label";
   private editDisabled = false;
   private mouseWheelEdit = false;
   private gridSize = 16;
@@ -522,6 +529,15 @@ export class NativeCircuitApp {
     } catch {
       this.runner = CircuitRunner.fromText(DEFAULT_CIRCUIT);
     }
+    const initialDocument = new CircuitLoader().readCircuit(
+      linkedCircuit ?? DEFAULT_CIRCUIT
+    );
+    this.applyCircuitDisplayFlags(
+      initialDocument.format === "text"
+        ? initialDocument.flags
+        : new CircuitLoader().readCircuitFlags(initialDocument.options.flags)
+    );
+    this.applyCircuitControls(initialDocument.options);
     this.api = {
       loadCircuit: (source) => this.loadCircuit(source),
       exportCircuit: () => this.serializeCircuit(),
@@ -550,6 +566,7 @@ export class NativeCircuitApp {
         !this.getStoredOption("show-mode", true)
       );
     this.updateRunButtonAppearance();
+    this.syncControlPanel();
     this.syncResistorToolbarIcon();
     this.configureScopeChannels();
     this.refreshDrawSubcircuitMenu();
@@ -574,11 +591,15 @@ export class NativeCircuitApp {
       : CircuitRunner.fromText(source);
     nextRunner.analyzeCircuit();
     this.runner = nextRunner;
+    this.currentCircuitTitle =
+      circuitExamples.find((example) => example.source.trim() === source.trim())
+        ?.name ?? "";
     this.applyCircuitDisplayFlags(
       circuitDocument.format === "text"
         ? circuitDocument.flags
         : loader.readCircuitFlags(circuitDocument.options.flags)
     );
+    this.applyCircuitControls(circuitDocument.options);
     this.selectedIndex = null;
     this.selectedIndices.clear();
     this.draft = null;
@@ -605,6 +626,80 @@ export class NativeCircuitApp {
     this.running = running;
     this.updateRunButtonAppearance();
     this.runButton.classList.toggle("active", running);
+  }
+
+  private static clampRange(value: string | number, minimum: number, maximum: number): number {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return minimum;
+    return Math.min(maximum, Math.max(minimum, Math.round(parsed)));
+  }
+
+  /** The same conversion used by CirSim.getIterCount(). */
+  private static iterationsForSpeed(speed: number): number {
+    return Math.round(NativeCircuitApp.iterationCountForSpeed(speed));
+  }
+
+  private static iterationCountForSpeed(speed: number): number {
+    return speed <= 0 ? 0 : 0.1 * Math.exp((speed - 61) / 24);
+  }
+
+  private setSimulationSpeed(value: string | number): void {
+    this.simulationSpeed = NativeCircuitApp.clampRange(value, 0, 260);
+    this.stepsPerFrame = NativeCircuitApp.iterationsForSpeed(this.simulationSpeed);
+  }
+
+  /** Restore the three UIManager panel controls from either legacy format. */
+  private applyCircuitControls(options: {
+    iterationSpeed?: number | null;
+    currentSpeed?: number | null;
+    powerBrightness?: number | null;
+  } | null): void {
+    // CircuitLoader.clearCircuit() resets these before every circuit import.
+    this.setSimulationSpeed(117);
+    this.currentSpeed = 50;
+    this.powerBrightness = 50;
+    if (options !== null) {
+      if (options.iterationSpeed !== null && options.iterationSpeed !== undefined && options.iterationSpeed > 0) {
+        this.setSimulationSpeed(
+          Math.floor(Math.log(10 * options.iterationSpeed) * 24 + 61.5)
+        );
+      } else if (options.iterationSpeed === 0) {
+        this.setSimulationSpeed(0);
+      }
+      if (options.currentSpeed !== null && options.currentSpeed !== undefined) {
+        this.currentSpeed = NativeCircuitApp.clampRange(options.currentSpeed, 1, 100);
+      }
+      if (options.powerBrightness !== null && options.powerBrightness !== undefined) {
+        this.powerBrightness = NativeCircuitApp.clampRange(options.powerBrightness, 1, 100);
+      }
+    }
+    CircuitElm.powerMult = Math.exp(this.powerBrightness / 4.762 - 7);
+    this.syncControlPanel();
+  }
+
+  /** Keep the legacy-only default panel free of our convenience inspector. */
+  private syncControlPanel(): void {
+    const simulationSpeed = this.root.querySelector<HTMLInputElement>(
+      '[data-control="simulation-speed"]'
+    );
+    const currentSpeed = this.root.querySelector<HTMLInputElement>(
+      '[data-control="current-speed"]'
+    );
+    const powerBrightness = this.root.querySelector<HTMLInputElement>(
+      '[data-control="power-brightness"]'
+    );
+    if (simulationSpeed !== null) simulationSpeed.value = String(this.simulationSpeed);
+    if (currentSpeed !== null) currentSpeed.value = String(this.currentSpeed);
+    if (powerBrightness !== null) {
+      powerBrightness.value = String(this.powerBrightness);
+      powerBrightness.disabled = !this.renderer.showPower;
+      powerBrightness.closest("label")?.classList.toggle(
+        "disabled",
+        !this.renderer.showPower
+      );
+    }
+    const circuitTitle = this.root.querySelector<HTMLElement>("#current-circuit-title");
+    if (circuitTitle !== null) circuitTitle.textContent = this.currentCircuitTitle;
   }
 
   private getElementClickPoint(index: number): { x: number; y: number } {
@@ -677,7 +772,8 @@ export class NativeCircuitApp {
       // A hidden scope has no visual boundary.  Report the bottom of the
       // workspace so callers crop no fictitious bottom panel.
       scopeY: this.hasScopes() ? scope.top : box.bottom,
-      toolbarVisible: toolbar !== null && !toolbar.classList.contains("hidden")
+      toolbarVisible: toolbar !== null && !toolbar.classList.contains("hidden"),
+      viewport: { ...this.renderer.viewport }
     };
   }
 
@@ -829,12 +925,12 @@ export class NativeCircuitApp {
         return;
       }
       if (target.dataset.control === "simulation-speed") {
-        this.stepsPerFrame = Math.max(
-          1,
-          Math.round(2 ** (Number(target.value) / 12))
-        );
+        this.setSimulationSpeed(Number(target.value));
       } else if (target.dataset.control === "current-speed") {
-        this.currentSpeed = Number(target.value);
+        this.currentSpeed = NativeCircuitApp.clampRange(target.value, 1, 100);
+      } else if (target.dataset.control === "power-brightness") {
+        this.powerBrightness = NativeCircuitApp.clampRange(target.value, 1, 100);
+        CircuitElm.powerMult = Math.exp(this.powerBrightness / 4.762 - 7);
       } else if (target.dataset.parameter !== undefined) {
         this.updateElementParameter(
           target.dataset.parameter,
@@ -989,7 +1085,11 @@ export class NativeCircuitApp {
     window.addEventListener("keydown", (event) =>
       this.onKeyDown(event)
     );
-    window.addEventListener("resize", () => this.resizeCanvases());
+    // UIManager recentres the circuit after a resize.  Refit on the next
+    // frame so CSS layout has settled before reading the canvas dimensions.
+    window.addEventListener("resize", () =>
+      requestAnimationFrame(() => this.fitToView())
+    );
     window.addEventListener("blur", () => {
       if (!this.pauseWhenUnfocused || !this.running) return;
       this.resumeAfterFocus = true;
@@ -1317,6 +1417,8 @@ export class NativeCircuitApp {
     if (example === undefined) return;
     try {
       this.loadCircuit(example.source);
+      this.currentCircuitTitle = example.name;
+      this.syncControlPanel();
       this.exampleDialog.close();
     } catch (error) {
       this.showError(error);
@@ -2022,6 +2124,7 @@ export class NativeCircuitApp {
         break;
     }
     this.syncOptionButtons();
+    this.syncControlPanel();
     this.syncEditMenuState();
   }
 
@@ -3325,33 +3428,25 @@ export class NativeCircuitApp {
       this.selectedIndex === null
         ? null
         : this.runner.elements[this.selectedIndex];
+    if (selected === null) return;
     const value = 10 ** logarithmicValue;
     if (parameter === "resistance") {
       const element =
         selected instanceof ResistorElm
           ? selected
-          : this.runner.elements.find(
-              (candidate): candidate is ResistorElm =>
-                candidate instanceof ResistorElm
-            );
+          : undefined;
       element?.setResistance(value);
     } else if (parameter === "capacitance") {
       const element =
         selected instanceof CapacitorElm
           ? selected
-          : this.runner.elements.find(
-              (candidate): candidate is CapacitorElm =>
-                candidate instanceof CapacitorElm
-            );
+          : undefined;
       element?.setCapacitance(value);
     } else if (parameter === "inductance") {
       const element =
         selected instanceof InductorElm
           ? selected
-          : this.runner.elements.find(
-              (candidate): candidate is InductorElm =>
-                candidate instanceof InductorElm
-            );
+          : undefined;
       element?.setInductance(value);
     }
     this.runner.analyzed = false;
@@ -3604,8 +3699,10 @@ export class NativeCircuitApp {
       (this.autoDcOnReset ? 128 : 0);
     const options =
       `$ ${flags} ` +
-      `${this.runner.simulation.maxTimeStep} 10.2 50 ` +
-      `${CircuitElm.voltageRange} 43 ${this.runner.simulation.minTimeStep}`;
+      `${this.runner.simulation.maxTimeStep} ` +
+      `${NativeCircuitApp.iterationCountForSpeed(this.simulationSpeed)} ` +
+      `${this.currentSpeed} ${CircuitElm.voltageRange} ` +
+      `${this.powerBrightness} ${this.runner.simulation.minTimeStep}`;
     const modelRecords = this.runner.preservedTextRecords.filter(
       (record) => {
         const type = record.trimStart().split(/\s+/, 1)[0];
@@ -3675,6 +3772,12 @@ export class NativeCircuitApp {
     );
     root.setAttribute("st", String(this.runner.simulation.solverType));
     root.setAttribute("vr", String(CircuitElm.voltageRange));
+    root.setAttribute(
+      "ic",
+      String(NativeCircuitApp.iterationCountForSpeed(this.simulationSpeed))
+    );
+    root.setAttribute("cb", String(this.currentSpeed));
+    root.setAttribute("pb", String(this.powerBrightness));
 
     const modelRecords = this.runner.preservedXmlRecords.filter(
       (record) => record.kind === "model"
@@ -4203,14 +4306,13 @@ export class NativeCircuitApp {
     const title = this.root.querySelector<HTMLElement>("#selected-title");
     const details =
       this.root.querySelector<HTMLElement>("#selected-details");
+    const inspector = this.root.querySelector<HTMLElement>("#element-inspector");
+    if (inspector !== null) inspector.hidden = selected === null;
     if (title !== null) {
-      title.textContent =
-        selected === null ? "未选择元件" : selected.getClassName();
+      title.textContent = selected?.getClassName() ?? "";
     }
     if (details !== null) {
-      if (selected === null) {
-        details.textContent = "单击元件可查看；单击开关可切换状态";
-      } else {
+      if (selected !== null) {
         const values = [
           `电压 ${CircuitElm.getVoltageText(selected.getVoltageDiff())}`,
           `电流 ${CircuitElm.getCurrentText(selected.getCurrent())}`,
@@ -4222,6 +4324,8 @@ export class NativeCircuitApp {
           values.push(`转速 ${CircuitElm.getUnitText(rpm, "RPM")}`);
         }
         details.textContent = values.join(" · ");
+      } else {
+        details.textContent = "";
       }
     }
 
@@ -4229,28 +4333,19 @@ export class NativeCircuitApp {
       "resistance",
       selected instanceof ResistorElm
         ? selected.resistance
-        : this.runner.elements.find(
-            (element): element is ResistorElm =>
-              element instanceof ResistorElm
-          )?.resistance
+        : undefined
     );
     this.setParameterSlider(
       "capacitance",
       selected instanceof CapacitorElm
         ? selected.capacitance
-        : this.runner.elements.find(
-            (element): element is CapacitorElm =>
-              element instanceof CapacitorElm
-          )?.capacitance
+        : undefined
     );
     this.setParameterSlider(
       "inductance",
       selected instanceof InductorElm
         ? selected.inductance
-        : this.runner.elements.find(
-            (element): element is InductorElm =>
-              element instanceof InductorElm
-          )?.inductance
+        : undefined
     );
     this.renderElementProperties(selected);
     this.syncEditMenuState();
@@ -4872,10 +4967,17 @@ export class NativeCircuitApp {
 
   private fitToView(): void {
     this.resizeCanvases();
+    // Legacy UIManager.centerCircuit() reserves its default 20% scope band
+    // for the initial framing on narrow, scope-less layouts.  The workspace
+    // remains full height; only the fit calculation uses the reduced height.
+    const narrowReservedScopeHeight =
+      !this.hasScopes() && this.canvas.clientWidth < 800
+        ? Math.floor(this.canvas.clientHeight * 0.2)
+        : 0;
     this.renderer.fit(
       this.runner.elements,
       this.canvas.clientWidth,
-      this.canvas.clientHeight
+      this.canvas.clientHeight - narrowReservedScopeHeight
     );
   }
 
@@ -5456,29 +5558,32 @@ export class NativeCircuitApp {
               <button id="run-toggle" data-action="run" class="topButton"><strong>运行</strong>&nbsp;/&nbsp;停止</button>
             </div>
             <label>仿真速度
-              <input data-control="simulation-speed" type="range" min="0" max="84" value="55">
+              <input data-control="simulation-speed" type="range" min="0" max="260" value="117">
             </label>
             <label>电流动画
               <input data-control="current-speed" type="range" min="1" max="100" value="50">
             </label>
-            <div class="panel-rule"></div>
-            <h2 id="selected-title">未选择元件</h2>
-            <p id="selected-details">单击元件可查看</p>
-            <div id="element-properties"></div>
-            <label>电阻 <output data-parameter-value="resistance"></output>
-              <input data-parameter="resistance" type="range" min="0" max="7" step="0.01" value="3">
+            <label class="disabled">功率的亮度
+              <input data-control="power-brightness" type="range" min="1" max="100" value="50" disabled>
             </label>
-            <label>电容 <output data-parameter-value="capacitance"></output>
-              <input data-parameter="capacitance" type="range" min="-12" max="-2" step="0.01" value="-6">
-            </label>
-            <label>电感 <output data-parameter-value="inductance"></output>
-              <input data-parameter="inductance" type="range" min="-6" max="3" step="0.01" value="-2">
-            </label>
-            <div class="native-note">
-              纯 TypeScript 求解器<br>
-              拖动画线或移动元件，滚轮缩放<br>
-              右键或 Alt 拖动画布
+            <div class="current-circuit-summary">
+              <span>目前电路:</span>
+              <span id="current-circuit-title">Label</span>
             </div>
+            <section id="element-inspector" hidden>
+              <h2 id="selected-title"></h2>
+              <p id="selected-details"></p>
+              <div id="element-properties"></div>
+              <label>电阻 <output data-parameter-value="resistance"></output>
+                <input data-parameter="resistance" type="range" min="0" max="7" step="0.01" value="3">
+              </label>
+              <label>电容 <output data-parameter-value="capacitance"></output>
+                <input data-parameter="capacitance" type="range" min="-12" max="-2" step="0.01" value="-6">
+              </label>
+              <label>电感 <output data-parameter-value="inductance"></output>
+                <input data-parameter="inductance" type="range" min="-6" max="3" step="0.01" value="-2">
+              </label>
+            </section>
           </aside>
         </section>
       </main>

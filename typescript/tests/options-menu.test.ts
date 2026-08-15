@@ -164,30 +164,46 @@ describe("options menu functionality", () => {
       const text = `$ ${flags} 0.000005 10.2 50 17.5 43 5e-11`;
       app.api.loadCircuit(text);
       expectFlags(root, flags);
+      expect(
+        root.querySelector<HTMLInputElement>('[data-control="power-brightness"]')?.value
+      ).toBe("43");
       const textExport = app.api.exportCircuit();
-      expect(textExport).toMatch(new RegExp(`^\\$ ${flags} 0\\.000005 10\\.2 50 17\\.5 43 5e-11$`));
+      // UIManager serializes the quantized speed-bar value, not the incoming
+      // decimal.  10.2 maps to bar 117, then back to this legacy value.
+      expect(textExport).toMatch(new RegExp(`^\\$ ${flags} 0\\.000005 10\\.20027730826997 50 17\\.5 43 5e-11$`));
 
       const textReloadRoot = document.createElement("div");
       document.body.append(textReloadRoot);
       const textReload = new NativeCircuitApp(textReloadRoot);
       textReload.api.loadCircuit(textExport);
       expectFlags(textReloadRoot, flags);
+      expect(
+        textReloadRoot.querySelector<HTMLInputElement>('[data-control="power-brightness"]')?.value
+      ).toBe("43");
       expect(textReload.api.exportCircuit()).toBe(textExport);
 
-      const xml = `<cir f="${flags}" ts="0.000005" mts="5e-11" vr="17.5"/>`;
+      const xml = `<cir f="${flags}" ts="0.000005" mts="5e-11" vr="17.5" pb="41"/>`;
       app.api.loadCircuit(xml);
       expectFlags(root, flags);
+      expect(
+        root.querySelector<HTMLInputElement>('[data-control="power-brightness"]')?.value
+      ).toBe("41");
       const xmlExport = app.api.exportCircuit();
       expect(xmlExport).toContain(`f="${flags}"`);
       expect(xmlExport).toContain('vr="17.5"');
+      expect(xmlExport).toContain('pb="41"');
 
       const xmlReloadRoot = document.createElement("div");
       document.body.append(xmlReloadRoot);
       const xmlReload = new NativeCircuitApp(xmlReloadRoot);
       xmlReload.api.loadCircuit(xmlExport);
       expectFlags(xmlReloadRoot, flags);
+      expect(
+        xmlReloadRoot.querySelector<HTMLInputElement>('[data-control="power-brightness"]')?.value
+      ).toBe("41");
       expect(xmlReload.api.exportCircuit()).toContain(`f="${flags}"`);
       expect(xmlReload.api.exportCircuit()).toContain('vr="17.5"');
+      expect(xmlReload.api.exportCircuit()).toContain('pb="41"');
     }
   });
 
