@@ -3358,6 +3358,9 @@ export class CircuitCanvasRenderer {
     context: CanvasRenderingContext2D,
     element: ChipElm
   ): void {
+    const selected =
+      String(context.strokeStyle).toLowerCase() ===
+      this.selectionColor.toLowerCase();
     const topLeft = {
       x:
         element.bodyLeft * this.viewport.scale +
@@ -3374,13 +3377,6 @@ export class CircuitCanvasRenderer {
         element.bodyBottom * this.viewport.scale +
         this.viewport.offsetY
     };
-    context.strokeRect(
-      topLeft.x,
-      topLeft.y,
-      bottomRight.x - topLeft.x,
-      bottomRight.y - topLeft.y
-    );
-
     context.save();
     context.fillStyle = this.foregroundColor();
     context.textBaseline = "alphabetic";
@@ -3394,11 +3390,18 @@ export class CircuitCanvasRenderer {
     const measuredWidthModel = (label: string): number =>
       Math.trunc(context.measureText(label).width / this.viewport.scale);
     context.font = `normal ${defaultFontSize}px normal`;
-    for (const pin of element.pins) {
+    for (let index = 0; index < element.pins.length; index += 1) {
+      const pin = element.pins[index];
       if (pin.busZ > 0) continue;
       const post = this.modelToScreen(pin.post);
       const stub = this.modelToScreen(pin.stub);
       const text = this.modelToScreen(pin.textloc);
+      context.strokeStyle = selected
+        ? this.selectionColor
+        : this.showVoltage
+          ? this.voltageColor(element.volts[index] ?? 0)
+          : this.foregroundColor();
+      context.lineWidth = (pin.busWidth > 1 ? 5 : 3) * this.viewport.scale;
       this.line(context, post.x, post.y, stub.x, stub.y);
       if (pin.clock) {
         const direction = CircuitCanvasRenderer.direction(post, stub);
@@ -3472,6 +3475,18 @@ export class CircuitCanvasRenderer {
         (topLeft.y + bottomRight.y) / 2
       );
     }
+    context.strokeStyle = selected
+      ? this.selectionColor
+      : this.whiteBackground
+        ? "#000000"
+        : "#c0c0c0";
+    context.lineWidth = 3 * this.viewport.scale;
+    context.strokeRect(
+      topLeft.x,
+      topLeft.y,
+      bottomRight.x - topLeft.x,
+      bottomRight.y - topLeft.y
+    );
     context.restore();
   }
 
