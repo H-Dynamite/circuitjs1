@@ -85,6 +85,10 @@ try {
   // Legacy UIManager.centerCircuit() recalculates the same fitted transform
   // used when loading a circuit; it does not preserve a user wheel zoom.
   const canvas = page.locator("#circuit-canvas");
+  // The preceding enabled-state inspection intentionally leaves Edit open.
+  // Close it before targeting the canvas so popup width is irrelevant to the
+  // camera test's pointer coordinate.
+  await edit.evaluate((element) => { element.open = false; });
   await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   const fitted = await page.evaluate(() => window.CircuitJS1TS.getVisualRegressionLayout().viewport);
   await canvas.hover({ position: { x: 200, y: 200 } });

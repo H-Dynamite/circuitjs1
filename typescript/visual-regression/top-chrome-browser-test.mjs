@@ -331,7 +331,91 @@ try {
   approximately(filePopup.y, 30, "File popup y");
   approximately(filePopup.width, 197, "File popup width");
   approximately(filePopup.height, 345, "File popup height");
-  assert.equal(filePopup.y >= (filePopup.summaryBottom ?? Infinity), true, "File popup does not cover its summary");
+ assert.equal(filePopup.y >= (filePopup.summaryBottom ?? Infinity), true, "File popup does not cover its summary");
+  // Keep the shared popup density tied to the rendered GWT geometry.  These
+  // checks deliberately inspect CSS/layout only; menu actions and contents
+  // remain covered by their focused browser tests.
+  const legacyPopupBoxes = [
+    { width: 194.125, height: 345, x: 3 },
+    { width: 152.796875, height: 331, x: 49 },
+    { width: 187, height: 293, x: 95 },
+    { width: 146.125, height: 93, x: 141 },
+    { width: 165, height: 313, x: 199 },
+    { width: 174, height: 53, x: 245 },
+    { width: 144.03125, height: 453, x: 291 }
+  ];
+  const popupBoxes = [];
+  for (let index = 0; index < legacyPopupBoxes.length; index += 1) {
+    await page.evaluate((openIndex) => {
+      const menus = Array.from(document.querySelectorAll(".menu-bar > details"));
+      menus.forEach((menu, menuIndex) => { menu.open = menuIndex === openIndex; });
+    }, index);
+    popupBoxes.push(await page.locator(".menu-bar > details").nth(index).locator(":scope > .menu-popup").evaluate((element) => {
+      const box = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      const directButton = element.querySelector(":scope > button");
+      return {
+        x: box.x, y: box.y, width: box.width, height: box.height,
+        fontSize: style.fontSize, fontWeight: style.fontWeight,
+        directRowHeight: directButton?.getBoundingClientRect().height
+      };
+    }));
+  }
+  popupBoxes.forEach((box, index) => {
+    assert.equal(box.fontSize, "12px", `popup ${index} legacy font size`);
+    assert.equal(box.fontWeight, "400", `popup ${index} legacy font weight`);
+    approximately(box.y, 30, `popup ${index} y`);
+    assert.ok(Math.abs(box.x - legacyPopupBoxes[index].x) <= 3, `popup ${index} x drift: ${box.x}`);
+    if (box.directRowHeight !== undefined) approximately(box.directRowHeight, 20, `popup ${index} direct row height`);
+  });
+  const stablePopupIndexes = [0, 2, 6];
+  const stablePopupBoxes = [
+    { x: 0, y: 30, width: 197, height: 345 },
+    { x: 95, y: 30, width: 178, height: 301 },
+    { x: 290, y: 30, width: 160, height: 425 }
+  ];
+  stablePopupIndexes.forEach((index, stableIndex) => {
+    for (const key of ["x", "y", "width", "height"]) {
+      approximately(popupBoxes[index][key], stablePopupBoxes[stableIndex][key], `stable popup ${index} ${key}`);
+    }
+  });
+  const densityPopupIndexes = [1, 3, 4, 5];
+  const heightError = densityPopupIndexes.reduce((sum, index) => {
+    assert.ok(Math.abs(popupBoxes[index].width - legacyPopupBoxes[index].width) <= 8, `popup ${index} width tolerance`);
+    assert.ok(Math.abs(popupBoxes[index].height - legacyPopupBoxes[index].height) <= 18, `popup ${index} height tolerance`);
+    return sum + Math.abs(popupBoxes[index].height - legacyPopupBoxes[index].height);
+  }, 0);
+  assert.ok(heightError <= 40, `shared popup aggregate height error: ${heightError}`);
+
+  const densityStyles = await page.evaluate(() => {
+    const separator = document.querySelector('.menu-bar > details[data-menu="edit"] > .menu-popup > hr');
+    const options = Array.from(document.querySelectorAll(".option-menu > button[aria-pressed]"));
+    if (!(separator instanceof HTMLElement)) throw new Error("Missing Edit popup separator");
+    const separatorStyle = getComputedStyle(separator);
+    return {
+      separator: {
+        height: separator.getBoundingClientRect().height,
+        marginTop: separatorStyle.marginTop,
+        marginBottom: separatorStyle.marginBottom,
+        color: separatorStyle.backgroundColor
+      },
+      checks: options.map((button) => ({
+        pressed: button.getAttribute("aria-pressed"),
+        content: getComputedStyle(button, "::before").content,
+        color: getComputedStyle(button, "::before").color
+      }))
+    };
+  });
+  approximately(densityStyles.separator.height, 1, "popup separator line height");
+  assert.equal(densityStyles.separator.marginTop, "2px", "popup separator top spacing");
+  assert.equal(densityStyles.separator.marginBottom, "2px", "popup separator bottom spacing");
+  assert.equal(densityStyles.separator.color, "rgb(204, 204, 204)", "popup separator color");
+  assert.ok(densityStyles.checks.some((check) => check.pressed === "true"), "Options exposes a checked row");
+  assert.ok(densityStyles.checks.some((check) => check.pressed === "false"), "Options exposes an unchecked row");
+  densityStyles.checks.forEach((check) => {
+    assert.equal(check.content, check.pressed === "true" ? '"✓"' : '""', `Options ${check.pressed} marker`);
+    assert.equal(check.color, "rgb(0, 0, 0)", `Options ${check.pressed} marker color`);
+  });
   console.log(`Top chrome browser layout: ${CASES.map((testCase) => testCase.id).join(", ")} passed.`);
 } finally {
   await browser.close();
