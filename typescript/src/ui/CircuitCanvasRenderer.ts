@@ -13,6 +13,7 @@ import {
   CrystalElm,
   CustomTransformerElm,
   CurrentElm,
+  CustomCompositeElm,
   DataInputElm,
   DataRecorderElm,
   DCMotorElm,
@@ -98,6 +99,7 @@ export interface DraftElement {
 }
 
 const CURRENT_TOO_FAST = 100;
+const CUSTOM_COMPOSITE_FLAG_SHOW_LABEL = 1;
 
 export function calculateCurrentDotAdvance(
   current: number,
@@ -2524,7 +2526,7 @@ export class CircuitCanvasRenderer {
     this.line(context, post.x, post.y, lead.x, lead.y);
     context.save();
     context.fillStyle = this.foregroundColor();
-    context.font = "bold 20px Arial";
+    context.font = `bold ${20 * this.viewport.scale}px sans-serif`;
     context.textAlign = "center";
     context.textBaseline = "middle";
     context.fillText(value, labelPoint.x, labelPoint.y);
@@ -3029,21 +3031,6 @@ export class CircuitCanvasRenderer {
     }
     context.stroke();
 
-    if (this.iecGates) {
-      context.fillStyle = this.foregroundColor();
-      context.font = `bold ${Math.max(10, 12 * this.viewport.scale)}px Arial`;
-      context.textAlign = "center";
-      context.textBaseline = "middle";
-      const symbol =
-        element.getGateName() === "AND" || element.getGateName() === "NAND"
-          ? "&"
-          : element.getGateName() === "XOR" ||
-              element.getGateName() === "XNOR"
-            ? "=1"
-            : "≥1";
-      context.fillText(symbol, bodyLength / 2, 0);
-    }
-
     if (!this.iecGates && element.getGateName() === "XOR") {
       context.beginPath();
       context.moveTo(-5, -halfHeight);
@@ -3056,6 +3043,30 @@ export class CircuitCanvasRenderer {
       context.stroke();
     }
     context.restore();
+
+    if (this.iecGates) {
+      const center = this.modelToScreen(
+        element.interpPoint(element.point1, element.point2, 0.5)
+      );
+      const symbol =
+        element.getGateName() === "AND" || element.getGateName() === "NAND"
+          ? "&"
+          : element.getGateName() === "XOR" ||
+              element.getGateName() === "XNOR"
+            ? "=1"
+            : "≥1";
+      context.save();
+      context.fillStyle = this.foregroundColor();
+      context.font = `normal ${12 * this.viewport.scale}px sans-serif`;
+      context.textAlign = "center";
+      context.textBaseline = "middle";
+      context.fillText(
+        symbol,
+        center.x,
+        center.y - 6 * element.gsize * this.viewport.scale
+      );
+      context.restore();
+    }
 
     if (element.isInverting()) {
       const bubbleRadius = Math.max(2.5, 3 * this.viewport.scale);
@@ -3369,10 +3380,20 @@ export class CircuitCanvasRenderer {
     );
 
     context.save();
-    context.font = `${Math.max(8, 10 * element.csize * this.viewport.scale)}px Arial`;
     context.fillStyle = this.foregroundColor();
-    context.textBaseline = "middle";
+    context.textBaseline = "alphabetic";
+    const hasVerticalPins = element.pins.some(
+      (pin) => pin.side === ChipElm.SIDE_N || pin.side === ChipElm.SIDE_S
+    );
+    const defaultFontSize = 10 * element.csize * this.viewport.scale;
+    const availableSpaceModel = hasVerticalPins || element.sizeX <= 2
+      ? element.cspc * 2 - 8
+      : element.cspc * 2.5 + element.cspc * (element.sizeX - 3);
+    const measuredWidthModel = (label: string): number =>
+      Math.trunc(context.measureText(label).width / this.viewport.scale);
+    context.font = `normal ${defaultFontSize}px normal`;
     for (const pin of element.pins) {
+      if (pin.busZ > 0) continue;
       const post = this.modelToScreen(pin.post);
       const stub = this.modelToScreen(pin.stub);
       const text = this.modelToScreen(pin.textloc);
@@ -3400,47 +3421,55 @@ export class CircuitCanvasRenderer {
         context.stroke();
       }
       if (pin.text.length > 0) {
-        context.textAlign =
-          pin.side === ChipElm.SIDE_W
-            ? "left"
-            : pin.side === ChipElm.SIDE_E
-              ? "right"
-              : "center";
-        const offsetX =
-          pin.side === ChipElm.SIDE_W
-            ? 4
-            : pin.side === ChipElm.SIDE_E
-              ? -4
-              : 0;
-        const offsetY =
-          pin.side === ChipElm.SIDE_N
-            ? 8
-            : pin.side === ChipElm.SIDE_S
-              ? -8
-              : 0;
+        const label = pin.busWidth > 1 ? `${pin.text}/${pin.busWidth}` : pin.text;
+        let fontSize = defaultFontSize;
+        context.font = `normal ${fontSize}px normal`;
+        while (
+          measuredWidthModel(label) > availableSpaceModel &&
+          fontSize > this.viewport.scale
+        ) {
+          fontSize -= this.viewport.scale;
+          context.font = `normal ${fontSize}px normal`;
+        }
+        const width = measuredWidthModel(label) * this.viewport.scale;
+        const isLeftEdge = post.x < stub.x;
+        const isRightEdge = post.x > stub.x;
+        const labelX = isLeftEdge
+          ? text.x - (element.cspc - 5) * this.viewport.scale
+          : isRightEdge
+            ? text.x + (element.cspc - 5) * this.viewport.scale - width
+            : text.x - width / 2;
+        const labelY = text.y + fontSize / 3;
         context.fillText(
-          pin.text,
-          text.x + offsetX,
-          text.y + offsetY
+          label,
+          labelX,
+          labelY
         );
         if (pin.lineOver) {
-          const width = context.measureText(pin.text).width;
           this.line(
             context,
-            text.x - width / 2,
-            text.y - 7,
-            text.x + width / 2,
-            text.y - 7
+            labelX,
+            text.y - (fontSize * 2) / 3,
+            labelX + width,
+            text.y - (fontSize * 2) / 3
           );
         }
       }
     }
-    context.textAlign = "center";
-    context.fillText(
-      element.getChipName(),
-      (topLeft.x + bottomRight.x) / 2,
-      (topLeft.y + bottomRight.y) / 2
-    );
+    if (
+      element instanceof CustomCompositeElm &&
+      element.model !== null &&
+      (element.model.flags & CUSTOM_COMPOSITE_FLAG_SHOW_LABEL) !== 0
+    ) {
+      context.font = `normal ${defaultFontSize}px normal`;
+      context.textAlign = "center";
+      context.textBaseline = "middle";
+      context.fillText(
+        element.modelName,
+        (topLeft.x + bottomRight.x) / 2,
+        (topLeft.y + bottomRight.y) / 2
+      );
+    }
     context.restore();
   }
 
