@@ -60,7 +60,7 @@ export class ExtVoltageElm extends RailElm {
   }
 
   public setVoltage(voltage: number): void {
-    if (Number.isFinite(voltage)) this.voltage = voltage;
+    if (!Number.isNaN(voltage)) this.voltage = voltage;
   }
 
   public getName(): string {

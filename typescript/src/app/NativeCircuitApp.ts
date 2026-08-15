@@ -14,6 +14,7 @@ import {
   DCMotorElm,
   DelayBufferElm,
   ElementFactory,
+  ExtVoltageElm,
   InductorElm,
   LampElm,
   FuseElm,
@@ -401,6 +402,8 @@ export function scopeValueMapping(
 export interface NativeCircuitApi {
   loadCircuit(source: string): void;
   exportCircuit(): string;
+  /** Set every legacy External Voltage source whose name exactly matches. */
+  setExtVoltage(name: string, value: number): void;
   setRunning(running: boolean): void;
   getElements(): readonly CircuitElm[];
   getTime(): number;
@@ -634,6 +637,7 @@ export class NativeCircuitApp {
     this.api = {
       loadCircuit: (source) => this.loadCircuit(source),
       exportCircuit: () => this.serializeCircuit(),
+      setExtVoltage: (name, value) => this.setExtVoltage(name, value),
       setRunning: (running) => this.setRunning(running),
       getElements: () => this.runner.elements,
       getTime: () => this.runner.simulation.t,
@@ -723,6 +727,15 @@ export class NativeCircuitApp {
     this.running = running;
     this.updateRunButtonAppearance();
     this.runButton.classList.toggle("active", running);
+  }
+
+  /** Mirrors JSInterface.setExtVoltage(): update every same-named source. */
+  public setExtVoltage(name: string, value: number): void {
+    for (const element of this.runner.elements) {
+      if (element instanceof ExtVoltageElm && element.getName() === name) {
+        element.setVoltage(value);
+      }
+    }
   }
 
   private static clampRange(value: string | number, minimum: number, maximum: number): number {
