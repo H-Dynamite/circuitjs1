@@ -8,6 +8,36 @@ function panels(snapshot) {
   return [...new Set(snapshot.scopes.map((scope) => scope.panel))].sort((a, b) => a - b);
 }
 
+async function xyCanvasAfterFixedSteps(page, steps = 2048) {
+  return page.evaluate(async (fixedSteps) => {
+    const canvas = document.querySelector("#scope-canvas");
+    if (!(canvas instanceof HTMLCanvasElement)) return null;
+    const context = canvas.getContext("2d");
+    if (context === null) return null;
+    window.CircuitJS1TS.setVisualRegressionSchedulerHold(true);
+    window.CircuitJS1TS.setRunning(false);
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    const baseline = new Uint8ClampedArray(
+      context.getImageData(0, 0, canvas.width, canvas.height).data
+    );
+    window.CircuitJS1TS.stepSimulation(fixedSteps);
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+    let bright = 0;
+    let colored = 0;
+    let changed = 0;
+    for (let index = 0; index < pixels.length; index += 4) {
+      const red = pixels[index] ?? 0;
+      const green = pixels[index + 1] ?? 0;
+      const blue = pixels[index + 2] ?? 0;
+      if (red > 180 || green > 180 || blue > 180) bright += 1;
+      if (red !== green || green !== blue) colored += 1;
+      if (red !== baseline[index] || green !== baseline[index + 1] || blue !== baseline[index + 2]) changed += 1;
+    }
+    return { bright, colored, changed };
+  }, steps);
+}
+
 const server = await createServer({
   root: ROOT,
   logLevel: "error",
@@ -49,6 +79,16 @@ try {
     assert.equal(await enabled(action), false, `${action} disabled with zero scopes`);
   }
 
+  // Existing legacy fixtures exercise VAL_R=2 on the Lamp and Memristor.
+  // Their scopes must stay in ohms rather than being silently treated as V.
+  for (const fixture of ["lightbulb.txt", "mr.txt"]) {
+    const source = await (await page.request.get(`http://127.0.0.1:${address.port}/src/examples/circuits/${fixture}`)).text();
+    await page.evaluate((text) => window.CircuitJS1TS.loadCircuit(text), source);
+    const resistanceScope = (await state()).scopes.find((scope) => scope.unit === "Ω");
+    assert.ok(resistanceScope, `${fixture} restores its VAL_R scope in ohms`);
+    assert.match(resistanceScope.name, /电阻/, `${fixture} labels VAL_R as resistance`);
+  }
+
   // 555int has two persisted scopes in positions 0 and 1.  All transformations
   // below use the visible Scope and Edit menu buttons; the bridge only observes
   // state and performs the public export/reload compatibility check.
@@ -62,6 +102,19 @@ try {
   const scopedLayout = await page.evaluate(() => window.CircuitJS1TS.getVisualRegressionLayout());
   assert.equal(scopedLayout.canvas.height, 665, "scopes retain the legacy-sized main workspace at the standard viewport");
   assert.equal(scopedLayout.scopeY, 735, "scope panel starts after the legacy-sized main workspace");
+  // ScopePlot samples by simulation time, not requestAnimationFrame: after 32
+  // real solver steps make the two speed-16 channels advance one bucket ahead
+  // of the speed-32 scope.  The initial count can include a real pre-test UI
+  // frame, so assert their deterministic relative time-base rather than a
+  // frame-rate-dependent absolute count.
+  await page.evaluate(() => window.CircuitJS1TS.stepSimulation(32));
+  const sampled = await state();
+  const counts = sampled.scopes.map((scope) => scope.sampleCount);
+  assert.equal(counts[0], counts[1], "paired speed-16 plots share a bucket clock");
+  assert.equal(counts[0], (counts[2] ?? 0) + 1,
+    "scope speed advances min/max ring buckets on simulation time");
+  assert.ok(sampled.scopes.every((scope) => scope.minimum !== null && scope.maximum !== null),
+    "scope snapshots retain finite extrema rather than one frame value");
   await openScopes();
   assert.deepEqual(panels(await state()), [0, 1], "fixture restores its original scope positions");
   assert.equal(await enabled("scope-stack"), true, "Stack enabled iff final scope position is nonzero");
@@ -101,8 +154,8 @@ try {
   assert.deepEqual(panels(await state()), [0, 1], "Separate restores independently positioned plots");
 
   // XML scope state has attributes that do not exist in old text dumps.  The
-  // native first stage must keep XY channels, manual per-plot scaling and
-  // brightness state even though XY trace drawing is a later migration phase.
+  // native renderer must both retain the advanced fields and draw its real
+  // continuous XY trajectory from solver samples.
   const xySource = await (await page.request.get(`http://127.0.0.1:${address.port}/src/examples/circuits/plot2d-checker.txt`)).text();
   await page.evaluate((text) => window.CircuitJS1TS.loadCircuit(text), xySource);
   const xyExport = await page.evaluate(() => window.CircuitJS1TS.exportCircuit());
@@ -129,13 +182,40 @@ try {
     [["0.75", "-85"], ["0.000049999999999999996", "0"], ["0.5", "-126"], ["0.000049999999999999996", "0"], ["2", "0"], ["0.000049999999999999996", "0"]],
     "per-plot manual scales and positions survive XML export"
   );
+  const xyCanvas = await xyCanvasAfterFixedSteps(page);
+  assert.ok(xyCanvas !== null && xyCanvas.bright > 100,
+    "plot2d-checker paints a real XY Canvas path after exactly 2048 solver steps");
+  assert.ok(xyCanvas !== null && xyCanvas.colored > 100,
+    "plot2d-checker preserves its green reference axes / XY color path");
+  assert.ok(xyCanvas !== null && xyCanvas.changed > 500,
+    "2048 deterministic solver samples change the Canvas by a continuous XY trail, not just status text");
+
+  for (const [fixture, expected] of [
+    ["plot2d-color.txt", ["6", "4", "10", "8"]],
+    ["plot2d-smile.txt", ["4", "6", "8", "10"]]
+  ]) {
+    const fixtureSource = await (await page.request.get(
+      `http://127.0.0.1:${address.port}/src/examples/circuits/${fixture}`
+    )).text();
+    await page.evaluate((text) => window.CircuitJS1TS.loadCircuit(text), fixtureSource);
+    const evidence = await xyCanvasAfterFixedSteps(page);
+    assert.ok(evidence !== null && evidence.changed > 500,
+      `${fixture} paints a real continuous XY trail after 2048 fixed solver steps`);
+    const attrs = await page.evaluate(() => {
+      const xml = new DOMParser().parseFromString(window.CircuitJS1TS.exportCircuit(), "application/xml");
+      const scope = xml.querySelector("o");
+      return ["xy2br", "xy2r", "xy2g", "xy2b"].map((name) => scope?.getAttribute(name) ?? null);
+    });
+    assert.deepEqual(attrs, expected,
+      `${fixture} preserves XY brightness/RGB settings after rendering`);
+  }
 
   // Regression for a previously lossy path: combine temporarily owns several
   // records, then Separate must restore each record's own advanced state.
   const advancedXml = '<cir ts="0.000005">' +
     '<r x="0 0 64 0" f="0" r="10"/><r x="96 0 160 0" f="0" r="20"/>' +
-    '<o en="0" sp="32" f="x2000d3" p="0" md="9" tp="7" triggerMode="2" triggerEdge="1" triggerLevel="1.25" xy2x="0" xy2y="1" xy2br="2"><p f="1" v="0" sc="4" ms="2" mp="-8"/></o>' +
-    '<o en="1" sp="96" f="x2000d3" p="1" md="11" tp="5" triggerMode="1" triggerEdge="0" triggerLevel="-0.5" xy2x="1" xy2y="0" xy2br="3"><p f="2" v="0" sc="8" ms="3" mp="14"/></o>' +
+    '<o en="0" sp="32" f="x2000d3" p="0" md="9" tp="7" triggerMode="2" triggerEdge="1" triggerLevel="1.25" xy2x="0" xy2y="1" xy2br="2" xy2r="3" xy2g="0" xy2b="4"><p f="1" v="0" sc="4" ms="2" mp="-8"/></o>' +
+    '<o en="1" sp="96" f="x2000d3" p="1" md="11" tp="0" triggerMode="1" triggerEdge="0" triggerLevel="-0.5" xy2x="1" xy2y="0" xy2br="3" xy2r="0" xy2g="2" xy2b="1"><p f="2" v="0" sc="8" ms="3" mp="14"/></o>' +
     '</cir>';
   await page.evaluate((text) => window.CircuitJS1TS.loadCircuit(text), advancedXml);
   await openScopes();
@@ -147,8 +227,8 @@ try {
     .parseFromString(text, "application/xml").querySelectorAll("o")]
     .map((scope) => ({ attrs: Object.fromEntries([...scope.attributes].map((attr) => [attr.name, attr.value])), plot: Object.fromEntries([...scope.querySelector("p").attributes].map((attr) => [attr.name, attr.value])) })), advancedXmlExport);
   assert.deepEqual(advancedXmlState, [
-    { attrs: { en: "0", sp: "32", f: "x2000d3", p: "0", md: "9", tp: "7", triggerMode: "2", triggerEdge: "1", triggerLevel: "1.25", xy2x: "0", xy2y: "1", xy2br: "2" }, plot: { f: "1", v: "0", sc: "4", ms: "2", mp: "-8" } },
-    { attrs: { en: "1", sp: "96", f: "x2000d3", p: "1", md: "11", tp: "5", triggerMode: "1", triggerEdge: "0", triggerLevel: "-0.5", xy2x: "1", xy2y: "0", xy2br: "3" }, plot: { f: "2", v: "0", sc: "8", ms: "3", mp: "14" } }
+    { attrs: { en: "0", sp: "32", f: "x2000d3", p: "0", md: "9", tp: "7", triggerMode: "2", triggerEdge: "1", triggerLevel: "1.25", xy2x: "0", xy2y: "1", xy2br: "2", xy2r: "3", xy2g: "0", xy2b: "4" }, plot: { f: "1", v: "0", sc: "4", ms: "2", mp: "-8" } },
+    { attrs: { en: "1", sp: "96", f: "x2000d3", p: "1", md: "11", tp: "0", triggerMode: "1", triggerEdge: "0", triggerLevel: "-0.5", xy2x: "1", xy2y: "0", xy2br: "3", xy2r: "0", xy2g: "2", xy2b: "1" }, plot: { f: "2", v: "0", sc: "8", ms: "3", mp: "14" } }
   ], "combine → separate preserves every XML scope's advanced state");
   await page.evaluate((text) => window.CircuitJS1TS.loadCircuit(text), advancedXmlExport);
   assert.equal((await state()).scopeCount, 2, "advanced XML scopes reload after combine/separate");

@@ -15,10 +15,13 @@ import {
   DelayBufferElm,
   ElementFactory,
   InductorElm,
+  LampElm,
   FuseElm,
   LDRElm,
   LabeledNodeElm,
   LogicInputElm,
+  MemristorElm,
+  OhmMeterElm,
   OpAmpRealElm,
   OptocouplerElm,
   Point,
@@ -31,6 +34,7 @@ import {
   SwitchElm,
   StopTriggerElm,
   ThermistorNTCElm,
+  TransistorElm,
   ThreePhaseMotorElm,
   TimeDelayRelayElm,
   TriStateElm,
@@ -58,6 +62,8 @@ import {
   DRAW_UNAVAILABLE_LEGACY_ITEM_IDS,
   type DrawMenuItem
 } from "./DrawMenu";
+import { ScopeSampler, type ScopeSampleBucket } from "./ScopeSampling";
+import { ScopeXYTrajectory, type ScopeXYChannel, type ScopeXYSettings } from "./ScopeXY";
 
 const DEFAULT_CIRCUIT = [
   "$ 1 0.000005 10.20027730826997 50 5 43 5e-11",
@@ -311,7 +317,8 @@ interface ScopeChannel {
   unit: string;
   color: string;
   scale: number | null;
-  samples: number[];
+  /** ScopePlot-style extrema ring, sampled on solver time rather than frames. */
+  sampler: ScopeSampler;
   read: () => number;
   /** Scope record that created this plot; survives combine → separate. */
   sourceScopeId: number;
@@ -324,6 +331,8 @@ interface ScopeGroup {
   panel: number;
   plots: ScopeChannel[];
   state: CircuitScopeState;
+  /** Separate continuous XY runtime; never falls back through 1D buckets. */
+  xyTrajectory: ScopeXYTrajectory;
   /** Original plot ownership; lets an untouched/position-only scope round-trip losslessly. */
   sourcePlotKey: string;
 }
@@ -335,6 +344,45 @@ interface ScopeRectangle {
   y: number;
   width: number;
   height: number;
+}
+
+interface ScopeGrid {
+  gridMid: number;
+  gridMax: number;
+  gridStepY: number;
+  plotOffset: number;
+  gridMult: number;
+}
+
+/** ScopeElm value/unit dispatch mirroring CircuitElm/Capacitor/Transistor. */
+export function scopeValueMapping(
+  element: CircuitElm,
+  value: number
+): { unit: string; suffix: string; read: () => number } {
+  if (element instanceof TransistorElm) {
+    switch (value) {
+      case 1: return { unit: "A", suffix: "Ib", read: () => element.ib };
+      case 2: return { unit: "A", suffix: "Ic", read: () => element.ic };
+      case 3: return { unit: "A", suffix: "Ie", read: () => element.ie };
+      case 4: return { unit: "V", suffix: "Vbe", read: () => element.getPostVoltage(0) - element.getPostVoltage(2) };
+      case 5: return { unit: "V", suffix: "Vbc", read: () => element.getPostVoltage(0) - element.getPostVoltage(1) };
+      case 6: return { unit: "V", suffix: "Vce", read: () => element.getPostVoltage(1) - element.getPostVoltage(2) };
+      case 7: return { unit: "W", suffix: "功率", read: () => element.getPower() };
+      default: return { unit: "V", suffix: "电压", read: () => 0 };
+    }
+  }
+  if (element instanceof CapacitorElm && value === 8) {
+    return { unit: "C", suffix: "电荷", read: () => element.capacitance * element.getVoltageDiff() };
+  }
+  if (value === 2 && (element instanceof LampElm || element instanceof MemristorElm)) {
+    return { unit: "Ω", suffix: "电阻", read: () => element.resistance };
+  }
+  if (value === 2 && element instanceof OhmMeterElm) {
+    return { unit: "Ω", suffix: "电阻", read: () => element.getResistance() };
+  }
+  if (value === 3) return { unit: "A", suffix: "电流", read: () => element.getCurrent() };
+  if (value === 7) return { unit: "W", suffix: "功率", read: () => element.getPower() };
+  return { unit: "V", suffix: "电压", read: () => element.getVoltageDiff() };
 }
 
 export interface NativeCircuitApi {
@@ -836,18 +884,16 @@ export class NativeCircuitApp {
         position: element instanceof PotElm ? element.position : null
       })),
       scopes: this.scopeGroups.flatMap((group) => group.plots.map((channel) => {
-        const values = channel.samples.filter(Number.isFinite);
+        const values = channel.sampler.values().filter(Number.isFinite);
+        const latest = channel.sampler.latest();
         return {
           scopeId: group.scopeId,
           plotCount: group.plots.length,
           name: channel.name,
           panel: group.panel,
           unit: channel.unit,
-          sampleCount: channel.samples.length,
-          lastSample:
-            channel.samples.length === 0
-              ? null
-              : channel.samples[channel.samples.length - 1] ?? null,
+          sampleCount: channel.sampler.sampleCount,
+          lastSample: latest?.maximum ?? null,
           minimum: values.length === 0 ? null : Math.min(...values),
           maximum: values.length === 0 ? null : Math.max(...values)
         };
@@ -1307,7 +1353,7 @@ export class NativeCircuitApp {
         this.commitHistory();
         break;
       case "scope-reset":
-        for (const channel of this.scopeGroups.flatMap((group) => group.plots)) channel.samples.length = 0;
+        this.clearScopeSamples();
         break;
       case "scope-export-csv":
         this.exportScopeCsv();
@@ -2014,7 +2060,7 @@ export class NativeCircuitApp {
       unit: "V",
       color: colors[this.scopeGroups.length % colors.length],
       scale: null,
-      samples: [],
+      sampler: new ScopeSampler(),
       read: () => element.getVoltageDiff(),
       sourceScopeId: scopeId,
       sourceScopeState: state
@@ -2024,6 +2070,7 @@ export class NativeCircuitApp {
       panel,
       plots: [plot],
       state,
+      xyTrajectory: new ScopeXYTrajectory(),
       sourcePlotKey: ""
     });
     this.syncScopePlots();
@@ -2327,6 +2374,7 @@ export class NativeCircuitApp {
           panel: position,
           plots,
           state: plots[0]?.sourceScopeState ?? this.newScopeState(position),
+          xyTrajectory: new ScopeXYTrajectory(),
           sourcePlotKey: this.scopePlotKey(plots)
         })
       );
@@ -2348,6 +2396,7 @@ export class NativeCircuitApp {
           panel: position,
           plots: [plot],
           state: { ...plot.sourceScopeState, rawText: undefined, rawXml: undefined },
+          xyTrajectory: new ScopeXYTrajectory(),
           sourcePlotKey: ""
         });
       }
@@ -2414,7 +2463,7 @@ export class NativeCircuitApp {
         red: -1,
         green: -1,
         blue: -1,
-        trailPersistence: 1
+        trailPersistence: 0
       },
       trigger: null
     };
@@ -3790,9 +3839,7 @@ export class NativeCircuitApp {
       element.reset();
     }
     this.runner.analyzed = false;
-    for (const channel of this.scopeGroups.flatMap((group) => group.plots)) {
-      channel.samples.length = 0;
-    }
+    this.clearScopeSamples();
     this.errorMessage = null;
     this.setRunning(true);
     if (this.autoDcOnReset) {
@@ -3963,6 +4010,13 @@ export class NativeCircuitApp {
       scope.setAttribute("p", String(group.panel));
       scope.setAttribute("sp", String(group.state.speed));
       scope.setAttribute("f", `x${group.state.flags.toString(16)}`);
+      scope.setAttribute("xy2x", String(group.state.plot2d.x));
+      scope.setAttribute("xy2y", String(group.state.plot2d.y));
+      scope.setAttribute("xy2br", String(group.state.plot2d.brightness));
+      scope.setAttribute("xy2r", String(group.state.plot2d.red));
+      scope.setAttribute("xy2g", String(group.state.plot2d.green));
+      scope.setAttribute("xy2b", String(group.state.plot2d.blue));
+      scope.setAttribute("tp", String(group.state.plot2d.trailPersistence));
       if (group.state.text !== null) scope.setAttribute("x", group.state.text);
       for (const plot of group.plots) {
         const child = document.createElement("p");
@@ -4138,21 +4192,27 @@ export class NativeCircuitApp {
     try {
       for (let index = 0; index < 256; index += 1) {
         this.runner.runCircuit(200);
+        this.recordScope();
       }
       this.errorMessage = null;
-      this.recordScope();
     } catch (error) {
       this.showError(error);
     }
   }
 
   private exportScopeCsv(): void {
+    const channels = this.scopeGroups.flatMap((group) => group.plots);
+    const samples = channels.map((channel) =>
+      channel.sampler.visible(channel.sampler.sampleCount).map(
+        (bucket) => bucket?.maximum
+      )
+    );
     const length = Math.max(
       0,
-      ...this.scopeGroups.flatMap((group) => group.plots).map((channel) => channel.samples.length)
+      ...samples.map((channel) => channel.length)
     );
     const rows = [
-      ["sample", ...this.scopeGroups.flatMap((group) => group.plots).map((channel) => channel.name)].join(
+      ["sample", ...channels.map((channel) => channel.name)].join(
         ","
       )
     ];
@@ -4160,9 +4220,7 @@ export class NativeCircuitApp {
       rows.push(
         [
           index,
-          ...this.scopeGroups.flatMap((group) => group.plots).map(
-            (channel) => channel.samples[index] ?? ""
-          )
+          ...samples.map((channel) => channel[index] ?? "")
         ].join(",")
       );
     }
@@ -4237,46 +4295,19 @@ export class NativeCircuitApp {
           .getClassName()
           .replace(/Elm$/, "");
         const elementLabel = this.scopeElementLabel(plot.element);
-        if (plot.value === 3) {
-          return {
-            elementIndex: plot.elementIndex,
-            value: plot.value,
-            name: `${className} 电流`,
-            elementLabel,
-            unit: "A",
-            color: "#00d83b",
-            scale: plot.scale,
-            samples: [],
-            read: () => plot.element.getCurrent(),
-            sourceScopeId: plot.scopeId,
-            sourceScopeState
-          };
-        }
-        if (plot.value === 7) {
-          return {
-            elementIndex: plot.elementIndex,
-            value: plot.value,
-            name: `${className} 功率`,
-            elementLabel,
-            unit: "W",
-            color: "#20a7ff",
-            scale: plot.scale,
-            samples: [],
-            read: () => plot.element.getPower(),
-            sourceScopeId: plot.scopeId,
-            sourceScopeState
-          };
-        }
+        const mapped = scopeValueMapping(plot.element, plot.value);
+        const color = mapped.unit === "V" ? "#20ff40" :
+          mapped.unit === "A" ? "#ffff00" : "#ffffff";
         return {
           elementIndex: plot.elementIndex,
           value: plot.value,
-          name: `${className} 电压`,
+          name: `${className} ${mapped.suffix}`,
           elementLabel,
-          unit: "V",
-          color: "#f1e900",
+          unit: mapped.unit,
+          color,
           scale: plot.scale,
-          samples: [],
-          read: () => plot.element.getVoltageDiff(),
+          sampler: new ScopeSampler(),
+          read: mapped.read,
           sourceScopeId: plot.scopeId,
           sourceScopeState
         };
@@ -4297,6 +4328,7 @@ export class NativeCircuitApp {
           panel: state.position,
           plots: channels,
           state,
+          xyTrajectory: new ScopeXYTrajectory(),
           sourcePlotKey: this.scopePlotKey(channels)
         };
       });
@@ -4314,10 +4346,14 @@ export class NativeCircuitApp {
   }
 
   private scopeElementLabel(element: CircuitElm): string {
-    if (element instanceof CapacitorElm) return "电容器";
+    if (element instanceof CapacitorElm) {
+      return `电容器, ${CircuitElm.getUnitText(element.capacitance, "F")}`;
+    }
     if (element instanceof InductorElm) return "电感器";
     if (element instanceof ResistorElm) return "电阻器";
-    return element.getClassName().replace(/Elm$/, "");
+    const name = element.getClassName().replace(/Elm$/, "");
+    if (name === "Output" || name === "LogicOutput") return "输出";
+    return name;
   }
 
   private animationFrame(now: number): void {
@@ -4329,6 +4365,7 @@ export class NativeCircuitApp {
         const frameBudget = 1000 / this.minimumFrameRate;
         for (let index = 0; index < this.stepsPerFrame; index += 1) {
           this.runner.runCircuit(200);
+          this.recordScope();
           if (
             this.runner.elements.some(
               (element) =>
@@ -4343,7 +4380,6 @@ export class NativeCircuitApp {
           }
         }
         this.errorMessage = null;
-        this.recordScope();
       } catch (error) {
         this.showError(error);
         this.setRunning(false);
@@ -4398,12 +4434,74 @@ export class NativeCircuitApp {
   }
 
   private recordScope(): void {
-    for (const channel of this.scopeGroups.flatMap((group) => group.plots)) {
-      channel.samples.push(channel.read());
-      if (channel.samples.length > 720) {
-        channel.samples.shift();
+    if (!this.hasScopes()) return;
+    const layout = this.scopeLayout(
+      Math.max(1, this.scopeCanvas.clientWidth),
+      Math.max(1, this.scopeCanvas.clientHeight)
+    );
+    for (const group of this.scopeGroups) {
+      const width = layout.rects.find((rect) => rect.scopeId === group.scopeId)
+        ?.width ?? 1;
+      let capacity = 1;
+      while (capacity <= Math.max(1, Math.ceil(width))) capacity *= 2;
+      for (const channel of group.plots) {
+        if (channel.sampler.capacity === 0) {
+          channel.sampler.reset(width, group.state.speed, this.runner.simulation.t);
+        } else if (channel.sampler.capacity !== capacity) {
+          channel.sampler.resize(width);
+        }
+        channel.sampler.record(
+          this.runner.simulation.t,
+          this.runner.simulation.maxTimeStep,
+          channel.read()
+        );
+      }
+      if (group.state.plot2d.enabled) {
+        group.xyTrajectory.resize(width, Math.max(1, layout.rects.find(
+          (rect) => rect.scopeId === group.scopeId
+        )?.height ?? 1));
+        group.xyTrajectory.record(
+          group.plots.map((channel): ScopeXYChannel => ({
+            read: channel.read,
+            manualScale: this.scopeManualPlot(group, channel)?.manualScale ?? null,
+            manualPosition: this.scopeManualPlot(group, channel)?.manualPosition ?? null
+          })),
+          this.scopeXYSettings(group),
+          this.runner.simulation.t
+        );
       }
     }
+  }
+
+  private clearScopeSamples(): void {
+    for (const group of this.scopeGroups) {
+      group.xyTrajectory.clear();
+      for (const channel of group.plots) {
+      channel.sampler.clear(this.runner.simulation.t);
+      }
+    }
+  }
+
+  private scopeManualPlot(group: ScopeGroup, channel: ScopeChannel) {
+    return group.state.plots.find(
+      (plot) => plot.elementIndex === channel.elementIndex && plot.value === channel.value
+    );
+  }
+
+  private scopeXYSettings(group: ScopeGroup): ScopeXYSettings {
+    const state = group.state;
+    return {
+      xy: state.plot2d.xy,
+      x: state.plot2d.x,
+      y: state.plot2d.y,
+      brightness: state.plot2d.brightness,
+      red: state.plot2d.red,
+      green: state.plot2d.green,
+      blue: state.plot2d.blue,
+      trailPersistence: state.plot2d.trailPersistence,
+      manual: (state.flags & 16) !== 0,
+      manualDivisions: state.manualDivisions
+    };
   }
 
   /** Pure counterpart of ScopeManager.setupScopes, shared by rendering/tests. */
@@ -4433,13 +4531,180 @@ export class NativeCircuitApp {
     return { columnCount, infoWidth, panelWidth, rects };
   }
 
+  private scopeExtrema(
+    buckets: ReadonlyArray<ScopeSampleBucket | undefined>
+  ): ScopeSampleBucket {
+    let minimum = Infinity;
+    let maximum = -Infinity;
+    for (const bucket of buckets) {
+      if (bucket === undefined) continue;
+      minimum = Math.min(minimum, bucket.minimum);
+      maximum = Math.max(maximum, bucket.maximum);
+    }
+    return Number.isFinite(minimum) && Number.isFinite(maximum)
+      ? { minimum, maximum }
+      : { minimum: 0, maximum: 0 };
+  }
+
+  private scopeGrid(
+    channel: ScopeChannel,
+    group: ScopeGroup,
+    buckets: ReadonlyArray<ScopeSampleBucket | undefined>,
+    height: number,
+    allSameUnits: boolean
+  ): ScopeGrid {
+    const extrema = this.scopeExtrema(buckets);
+    const defaultScale = channel.unit === "A" ? 0.1 : 5;
+    const manual = (group.state.flags & 16) !== 0;
+    const saved = group.state.plots.find(
+      (plot) => plot.elementIndex === channel.elementIndex && plot.value === channel.value
+    );
+    const halfHeight = Math.max(1, (height - 1) / 2);
+    let gridMax: number;
+    let gridMid = 0;
+    let positionOffset = 0;
+    let gridStepY: number;
+    if (manual && saved?.manualScale !== null && saved?.manualScale !== undefined) {
+      gridMax = (group.state.manualDivisions / 2 + 0.05) * saved.manualScale;
+      positionOffset = gridMax * 2 * (saved.manualPosition ?? 0) / 200;
+      gridStepY = saved.manualScale;
+    } else {
+      gridMax = channel.scale ?? (channel.unit === "A"
+        ? group.state.currentScale
+        : group.state.voltageScale) ?? defaultScale;
+      const maximum = Math.max(Math.abs(extrema.minimum), Math.abs(extrema.maximum));
+      while (gridMax < maximum) gridMax *= 2;
+      if (allSameUnits) {
+        let minimum = 0;
+        let maximumForGrid = gridMax;
+        if (extrema.minimum < (maximumForGrid + minimum) * 0.5 -
+          (maximumForGrid - minimum) * 0.55) {
+          minimum = -gridMax;
+        }
+        gridMid = (maximumForGrid + minimum) * 0.5;
+        gridMax = (maximumForGrid - minimum) * 0.55;
+      }
+      gridStepY = 1e-8;
+      const multipliers = [2, 2.5, 2];
+      let multiplierIndex = 0;
+      while (gridStepY < 20 * gridMax / halfHeight) {
+        gridStepY *= multipliers[multiplierIndex % multipliers.length] ?? 2;
+        multiplierIndex += 1;
+      }
+    }
+    return {
+      gridMid,
+      gridMax: Math.max(gridMax, Number.EPSILON),
+      gridStepY,
+      plotOffset: -gridMid + positionOffset,
+      gridMult: halfHeight / Math.max(gridMax, Number.EPSILON)
+    };
+  }
+
+  private drawScopeGrid(
+    context: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    group: ScopeGroup,
+    grid: ScopeGrid,
+    drawHorizontal: boolean
+  ): void {
+    // Match Scope.drawHVGridLines()'s normal canvas palette: the legacy
+    // minor divisions are #282828 and the emphasized centre/major lines are
+    // #585858 after GWT's anti-aliasing-free Canvas path.
+    const minor = this.renderer.whiteBackground ? "#d0d0d0" : "#282828";
+    const major = this.renderer.whiteBackground ? "#808080" : "#585858";
+    const centerY = y + (height - 1) / 2;
+    context.lineWidth = 1;
+    if (drawHorizontal) {
+      for (let division = -100; division <= 100; division += 1) {
+        const lineY = centerY - (division * grid.gridStepY + grid.plotOffset) * grid.gridMult;
+        if (lineY < y || lineY >= y + height - 1) continue;
+        context.strokeStyle = division === 0 && (group.state.flags & 16) === 0
+          ? major
+          : minor;
+        context.fillStyle = context.strokeStyle;
+        // GWT Canvas' integer drawLine spans the adjacent device row in the
+        // legacy capture.  Draw the same two-pixel raster without fractional
+        // browser anti-aliasing.
+        context.fillRect(x, Math.round(lineY) - 1, width, 2);
+      }
+    }
+    const timePerPixel = this.runner.simulation.maxTimeStep * Math.max(1, group.state.speed);
+    const multipliers = [2, 2.5, 2];
+    let gridStep = 1e-15;
+    let multiplierIndex = 0;
+    while (gridStep < timePerPixel * 20) {
+      gridStep *= multipliers[multiplierIndex % multipliers.length] ?? 2;
+      multiplierIndex += 1;
+    }
+    const rightTime = this.runner.simulation.t;
+    const startTime = rightTime - timePerPixel * width;
+    const aligned = rightTime - (rightTime % gridStep);
+    for (let lineTime = aligned; lineTime >= startTime; lineTime -= gridStep) {
+      if (lineTime < 0) continue;
+      const lineX = x + (lineTime - startTime) / timePerPixel;
+      if (lineX < x || lineX >= x + width) continue;
+      const ratio = (lineTime + gridStep / 4) % (gridStep * 10);
+      context.strokeStyle = ratio < gridStep ? major : minor;
+      context.beginPath();
+      context.moveTo(Math.round(lineX), y);
+      context.lineTo(Math.round(lineX), y + height);
+      context.stroke();
+    }
+  }
+
+  private drawScopeBuckets(
+    context: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    buckets: ReadonlyArray<ScopeSampleBucket | undefined>,
+    grid: ScopeGrid,
+    color: string
+  ): void {
+    const centerY = y + (height - 1) / 2;
+    const toY = (value: number) => centerY - (value + grid.plotOffset) * grid.gridMult;
+    let lastX: number | null = null;
+    let lastY: number | null = null;
+    context.strokeStyle = color;
+    context.lineWidth = 1;
+    for (const [index, bucket] of buckets.entries()) {
+      if (bucket === undefined) {
+        lastX = null;
+        lastY = null;
+        continue;
+      }
+      const bucketX = x + index * width / Math.max(1, buckets.length - 1);
+      const minY = toY(bucket.minimum);
+      const maxY = toY(bucket.maximum);
+      if (lastX !== null && lastY !== null && minY === maxY && lastY === minY) {
+        context.beginPath();
+        context.moveTo(lastX, lastY);
+        context.lineTo(bucketX, minY);
+        context.stroke();
+      } else {
+        context.beginPath();
+        context.moveTo(bucketX, minY);
+        context.lineTo(bucketX, maxY);
+        context.stroke();
+      }
+      lastX = bucketX;
+      lastY = maxY;
+    }
+  }
+
   private renderScopes(
     context: CanvasRenderingContext2D,
     width: number,
     height: number
   ): void {
     context.clearRect(0, 0, width, height);
-    context.fillStyle = this.renderer.whiteBackground ? "#ffffff" : "#101010";
+    // ScopeManager's normal backing fill is the dark UI surface (#111).
+    context.fillStyle = this.renderer.whiteBackground ? "#ffffff" : "#111111";
     context.fillRect(0, 0, width, height);
     // ScopeManager.setupScopes reserves CirSim.infoWidth at the right.  With
     // one or two scope columns it grows to 240px; three or more retain 160px.
@@ -4449,78 +4714,131 @@ export class NativeCircuitApp {
       this.scopeGroups.map((group) => [group, rects.find((rect) => rect.scopeId === group.scopeId)])
     );
 
-    for (let panel = 0; panel < columnCount; panel += 1) {
-      const x = panel * panelWidth;
-      context.save();
-      context.beginPath();
-      context.rect(x, 0, panelWidth - 10, height);
-      context.clip();
-      context.strokeStyle = this.renderer.whiteBackground
-        ? "#d1d5db"
-        : "#333";
-      context.lineWidth = 1;
-      context.beginPath();
-      context.moveTo(x, height / 2);
-      context.lineTo(x + panelWidth - 10, height / 2);
-      context.stroke();
-      if (panel > 0) {
-        context.beginPath();
-        context.moveTo(x, 0);
-        context.lineTo(x, height);
-        context.stroke();
-      }
-      context.restore();
-    }
-
-    this.scopeGroups.forEach((group) => group.plots.forEach((channel, channelIndex) => {
+    this.scopeGroups.forEach((group) => {
       const rect = rectangles.get(group);
       if (rect === undefined) return;
       const { x, y, width: scopeWidth, height: scopeHeight } = rect;
+      if (group.state.plot2d.enabled) {
+        this.drawScope2d(context, x, y, scopeWidth, scopeHeight, group);
+        return;
+      }
+      const allSameUnits = group.plots.every(
+        (channel) => channel.unit === group.plots[0]?.unit
+      );
+      const channels = group.plots.map((channel) => ({
+        channel,
+        // Java's freshly allocated double arrays contain zeroes.  Keep those
+        // unfilled history pixels drawable as a zero trace instead of making
+        // the first screenful disappear until the circular pointer wraps.
+        buckets: channel.sampler.visible(scopeWidth).map(
+          (bucket) => bucket ?? { minimum: 0, maximum: 0 }
+        )
+      }));
+      const scales = new Map(
+        channels.map(({ channel, buckets }) => [
+          channel,
+          this.scopeGrid(channel, group, buckets, scopeHeight, allSameUnits)
+        ])
+      );
       context.save();
       context.beginPath();
       context.rect(x, y, scopeWidth, scopeHeight);
       context.clip();
-      const max = Math.max(
-        1e-12,
-        ...channel.samples.map((sample) => Math.abs(sample))
-      );
-      context.strokeStyle = channel.color;
-      context.lineWidth = 1.6;
-      context.beginPath();
-      channel.samples.forEach((sample, sampleIndex) => {
-        const sampleX =
-          x +
-          (sampleIndex / Math.max(channel.samples.length - 1, 1)) * scopeWidth;
-        const sampleY =
-          y + scopeHeight / 2 - (sample / max) * (scopeHeight * 0.38);
-        if (sampleIndex === 0) {
-          context.moveTo(sampleX, sampleY);
-        } else {
-          context.lineTo(sampleX, sampleY);
-        }
-      });
-      context.stroke();
-
-      if (channelIndex === 0) {
-        context.fillStyle = this.renderer.whiteBackground
-          ? "#111827"
-          : "#f3f4f6";
+      const first = channels[0];
+      const firstScale = first === undefined ? undefined : scales.get(first.channel);
+      if (firstScale !== undefined) {
+        this.drawScopeGrid(context, x, y, scopeWidth, scopeHeight, group, firstScale, allSameUnits);
+      }
+      // Scope.drawPlot paints non-V/non-A first, then current, then voltage
+      // on top.  This matters when a V/I pair shares the zero baseline.
+      const paintOrder = (unit: string) => unit === "V" ? 2 : unit === "A" ? 1 : 0;
+      for (const { channel, buckets } of [...channels].sort(
+        (left, right) => paintOrder(left.channel.unit) - paintOrder(right.channel.unit)
+      )) {
+        const grid = scales.get(channel);
+        if (grid === undefined) continue;
+        this.drawScopeBuckets(context, x, y, scopeWidth, scopeHeight, buckets, grid, channel.color);
+      }
+      if (first !== undefined && firstScale !== undefined) {
+        const extrema = this.scopeExtrema(first.buckets);
+        context.fillStyle = this.renderer.whiteBackground ? "#111827" : "#f3f4f6";
         context.font = "12px Arial";
-        const label = `Max=${CircuitElm.getShortUnitText(max, channel.unit)}`;
         context.fillText(
-          label,
+          `Max=${CircuitElm.getUnitText(extrema.maximum, first.channel.unit)}`,
           x + 8,
-          y + 17
+          y + 10
         );
-        context.fillText(channel.elementLabel, x + 8, y + 32);
+        context.fillText(first.channel.elementLabel, x + 8, y + 25);
       }
       context.restore();
-    }));
+    });
     context.fillStyle = this.renderer.whiteBackground ? "#111827" : "#f3f4f6";
     context.font = "12px Arial";
     const infoX = columnCount * panelWidth + 8;
-    context.fillText(`时间: ${CircuitElm.getUnitText(this.runner.simulation.t, "s")}`, infoX, 18);
-    context.fillText(`时间步长: ${CircuitElm.getUnitText(this.runner.simulation.timeStep, "s")}`, infoX, 34);
+    context.fillText(`t = ${CircuitElm.getUnitText(this.runner.simulation.t, "s")}`, infoX, 18);
+    context.fillText(`时间步长 = ${CircuitElm.getUnitText(this.runner.simulation.timeStep, "s")}`, infoX, 34);
+  }
+
+  /** Render a continuous ScopePlot2d trail without contaminating 1D buckets. */
+  private drawScope2d(
+    context: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    group: ScopeGroup
+  ): void {
+    context.save();
+    context.beginPath();
+    context.rect(x, y, width, height);
+    context.clip();
+    const settings = this.scopeXYSettings(group);
+    group.xyTrajectory.resize(width, height);
+    const frame = group.xyTrajectory.frame(
+      this.runner.simulation.t,
+      this.runner.simulation.maxTimeStep
+    );
+    for (const segment of frame.segments) {
+      context.globalAlpha = segment.alpha;
+      context.strokeStyle = this.renderer.whiteBackground && segment.color === "#ffffff"
+        ? "#000000"
+        : segment.color;
+      context.beginPath();
+      context.moveTo(x + segment.fromX, y + segment.fromY);
+      context.lineTo(x + segment.toX, y + segment.toY);
+      context.stroke();
+    }
+    context.globalAlpha = 1;
+    if (frame.cursor !== null) {
+      context.fillStyle = this.renderer.whiteBackground ? "#000000" : "#ffffff";
+      context.fillRect(x + frame.cursor.x - 2, y + frame.cursor.y - 2, 5, 5);
+    }
+    // Legacy 2D plots always have a horizontal reference line.  The vertical
+    // line is yellow for the non-XY timing mode and green for XY mode.
+    context.strokeStyle = this.renderer.positiveColor;
+    context.beginPath();
+    context.moveTo(x, y + height / 2);
+    context.lineTo(x + width - 1, y + height / 2);
+    context.stroke();
+    context.strokeStyle = settings.xy ? this.renderer.positiveColor : "#ffff00";
+    context.beginPath();
+    context.moveTo(x + width / 2, y);
+    context.lineTo(x + width / 2, y + height - 1);
+    context.stroke();
+    if (settings.manual) {
+      const gridPx = (Math.min(width, height) / 2) /
+        (Math.max(1, settings.manualDivisions) / 2 + 0.05);
+      context.strokeStyle = this.renderer.whiteBackground ? "#c0c0c0" : "#404040";
+      for (let division = -settings.manualDivisions; division <= settings.manualDivisions; division += 1) {
+        context.beginPath();
+        context.moveTo(x + Math.trunc(gridPx * division) + width / 2, y);
+        context.lineTo(x + Math.trunc(gridPx * division) + width / 2, y + height);
+        context.moveTo(x, y + Math.trunc(gridPx * division) + height / 2);
+        context.lineTo(x + width, y + Math.trunc(gridPx * division) + height / 2);
+        context.stroke();
+      }
+    }
+    context.restore();
   }
 
   private updateInspector(): void {

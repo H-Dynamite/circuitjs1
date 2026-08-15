@@ -383,7 +383,7 @@ export class CircuitRunner {
         red: -1,
         green: -1,
         blue: -1,
-        trailPersistence: 1
+        trailPersistence: 0
       },
       trigger: null
     };
@@ -458,13 +458,18 @@ export class CircuitRunner {
     );
     state.manualDivisions = Number.parseInt(record.attributes.md ?? "8", 10) || 8;
     state.text = record.attributes.x ?? null;
-    state.plot2d.x = Number.parseInt(record.attributes.xy2x ?? "0", 10) || 0;
-    state.plot2d.y = Number.parseInt(record.attributes.xy2y ?? "1", 10) || 1;
+    const integer = (value: string | undefined, fallback: number) => {
+      const parsed = Number.parseInt(value ?? "", 10);
+      return Number.isFinite(parsed) ? parsed : fallback;
+    };
+    // Zero is a meaningful XY channel and trail value; never use `||` here.
+    state.plot2d.x = integer(record.attributes.xy2x, 0);
+    state.plot2d.y = integer(record.attributes.xy2y, 1);
     state.plot2d.brightness = Number.parseInt(record.attributes.xy2br ?? "-1", 10);
     state.plot2d.red = Number.parseInt(record.attributes.xy2r ?? "-1", 10);
     state.plot2d.green = Number.parseInt(record.attributes.xy2g ?? "-1", 10);
     state.plot2d.blue = Number.parseInt(record.attributes.xy2b ?? "-1", 10);
-    state.plot2d.trailPersistence = Number.parseInt(record.attributes.tp ?? "1", 10) || 1;
+    state.plot2d.trailPersistence = integer(record.attributes.tp, 0);
     if (record.attributes.triggerMode !== undefined) {
       state.trigger = {
         mode: Number.parseInt(record.attributes.triggerMode, 10),
