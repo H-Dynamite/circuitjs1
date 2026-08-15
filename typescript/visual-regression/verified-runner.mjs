@@ -5,6 +5,7 @@ import { chromium } from "@playwright/test";
 import { createServer } from "vite";
 
 const ROOT = process.cwd(), DEFAULT_OUTPUT = resolve(ROOT, "visual-regression", "artifacts");
+const STATIC_CURRENT_FRAME_ELAPSED_MS = 0;
 const CIRCUITS = resolve(ROOT, "src", "examples", "circuits"), VIEWPORT = { width: 1280, height: 900 };
 const REVIEW_DIFF_PIXEL_RATIO = 0.01, REVIEW_MAE = 0.002;
 const MENU_STRIP_GATE_ID = "3-cgand.txt", MENU_STRIP_MAE = 0.03;
@@ -177,9 +178,9 @@ async function legacyLoad(page, baseUrl, id, source, runningControls = false) {
     bridge.setVisualRegressionLayout(174, 665, true);
   }, source);
   await stableCanvas(page);
-  const legacyState = await page.evaluate(({ fixedSteps }) => {
+  const legacyState = await page.evaluate(({ fixedSteps, currentFrameElapsedMs }) => {
     const bridge = window.CircuitJS1;
-    if (typeof bridge?.setSimRunning !== "function" || typeof bridge?.isRunning !== "function" || typeof bridge?.stepSimulation !== "function" || typeof bridge?.getTime !== "function" || typeof bridge?.getTimeStep !== "function" || typeof bridge?.setVisualRegressionSchedulerHold !== "function") {
+    if (typeof bridge?.setSimRunning !== "function" || typeof bridge?.isRunning !== "function" || typeof bridge?.stepSimulation !== "function" || typeof bridge?.getTime !== "function" || typeof bridge?.getTimeStep !== "function" || typeof bridge?.setVisualRegressionSchedulerHold !== "function" || typeof bridge?.setVisualRegressionCurrentFrameElapsed !== "function") {
       throw new Error("Legacy visual capture requires deterministic time and scheduler-hold bridge methods");
     }
     bridge.setSimRunning(false);
@@ -189,13 +190,14 @@ async function legacyLoad(page, baseUrl, id, source, runningControls = false) {
     bridge.stepSimulation(fixedSteps);
     const finalTime = bridge.getTime();
     const finalTimeStep = bridge.getTimeStep();
+    bridge.setVisualRegressionCurrentFrameElapsed(currentFrameElapsedMs);
     bridge.setSimRunning(true);
     return {
       layout: bridge?.getVisualRegressionLayout?.(),
       running: bridge.isRunning(), fixedSteps, initialTime, initialTimeStep,
-      finalTime, finalTimeStep, simulationTime: finalTime, schedulerHeld: true
+      finalTime, finalTimeStep, simulationTime: finalTime, currentFrameElapsedMs, schedulerHeld: true
     };
-  }, { fixedSteps: STATIC_CAPTURE_STEPS });
+  }, { fixedSteps: STATIC_CAPTURE_STEPS, currentFrameElapsedMs: STATIC_CURRENT_FRAME_ELAPSED_MS });
   const { layout, running, fixedSteps, simulationTime, ...timeState } = legacyState;
   if (!visualLayoutStatus(layout)) throw new Error(`Invalid legacy visual layout: ${JSON.stringify(layout)}`);
   if (running !== true || fixedSteps !== STATIC_CAPTURE_STEPS) throw new Error(`Legacy visual capture state mismatch: ${JSON.stringify(legacyState)}`);
@@ -265,7 +267,7 @@ async function tsLoad(page, baseUrl, source, runningControls = false) {
   });
   const visualLayout = await page.evaluate(() => window.CircuitJS1TS.getVisualRegressionLayout?.());
   if (!visualLayoutStatus(visualLayout)) throw new Error(`Invalid TypeScript visual layout: ${JSON.stringify(visualLayout)}`);
-  const captureState = await page.evaluate((fixedSteps) => {
+  const captureState = await page.evaluate(({ fixedSteps, currentFrameElapsedMs }) => {
     const app = window.CircuitJS1TS;
     if (typeof app?.setRunning !== "function" || typeof app?.stepSimulation !== "function" || typeof app?.getDynamicSnapshot !== "function" || typeof app?.setVisualRegressionSchedulerHold !== "function") {
       throw new Error("TypeScript visual capture requires deterministic time and scheduler-hold bridge methods");
@@ -276,15 +278,18 @@ async function tsLoad(page, baseUrl, source, runningControls = false) {
     const stepped = app.stepSimulation(fixedSteps);
     const final = app.getDynamicSnapshot();
     app.setRunning(true);
-    return { running: app.getDynamicSnapshot().running, fixedSteps: stepped?.steps, initialTime: initial.time, initialTimeStep: initial.timeStep, finalTime: final.time, finalTimeStep: final.timeStep, simulationTime: final.time, schedulerHeld: true };
-  }, STATIC_CAPTURE_STEPS);
+    return { running: app.getDynamicSnapshot().running, fixedSteps: stepped?.steps, initialTime: initial.time, initialTimeStep: initial.timeStep, finalTime: final.time, finalTimeStep: final.timeStep, simulationTime: final.time, currentFrameElapsedMs, schedulerHeld: true };
+  }, { fixedSteps: STATIC_CAPTURE_STEPS, currentFrameElapsedMs: STATIC_CURRENT_FRAME_ELAPSED_MS });
   if (captureState.running !== true || captureState.fixedSteps !== STATIC_CAPTURE_STEPS) throw new Error(`TypeScript visual capture state mismatch: ${JSON.stringify(captureState)}`);
   return { inputSha256: sha(source), expectedElementCount, elementCountError, ...summary, exportedSha256: sha(exportedCircuit), paused: false, ...captureState, canvas, visualLayout, viewport: visualLayout.viewport };
 }
 function assertStaticCaptureState(legacy, ts) {
-  const state = { legacy: { running: legacy?.running, fixedSteps: legacy?.fixedSteps }, ts: { running: ts?.running, fixedSteps: ts?.fixedSteps } };
-  if (state.legacy.running !== true || state.ts.running !== true || state.legacy.fixedSteps !== STATIC_CAPTURE_STEPS || state.ts.fixedSteps !== STATIC_CAPTURE_STEPS) {
-    throw new Error(`Static visual capture requires both products RUN after ${STATIC_CAPTURE_STEPS} fixed steps; got ${JSON.stringify(state)}`);
+  const state = {
+    legacy: { running: legacy?.running, fixedSteps: legacy?.fixedSteps, currentFrameElapsedMs: legacy?.currentFrameElapsedMs },
+    ts: { running: ts?.running, fixedSteps: ts?.fixedSteps, currentFrameElapsedMs: ts?.currentFrameElapsedMs }
+  };
+  if (state.legacy.running !== true || state.ts.running !== true || state.legacy.fixedSteps !== STATIC_CAPTURE_STEPS || state.ts.fixedSteps !== STATIC_CAPTURE_STEPS || state.legacy.currentFrameElapsedMs !== STATIC_CURRENT_FRAME_ELAPSED_MS || state.ts.currentFrameElapsedMs !== STATIC_CURRENT_FRAME_ELAPSED_MS) {
+    throw new Error(`Static visual capture requires both products RUN after ${STATIC_CAPTURE_STEPS} fixed steps at a ${STATIC_CURRENT_FRAME_ELAPSED_MS}ms current-animation phase; got ${JSON.stringify(state)}`);
   }
   return state;
 }
