@@ -263,9 +263,10 @@ export class CircuitCanvasRenderer {
   public conventionalCurrent = false;
   public europeanResistors = true;
   public iecGates = false;
-  public positiveColor = "#20ff40";
-  public negativeColor = "#ff2828";
-  public neutralColor = "#a3a3a3";
+  // CircuitElm.setColorScale() defaults: Color.green/red/gray.
+  public positiveColor = "#00ff00";
+  public negativeColor = "#ff0000";
+  public neutralColor = "#808080";
   public selectionColor = "#38bdf8";
   public currentColor = "#ffe600";
   public crosshair: { x: number; y: number } | null = null;
@@ -5029,21 +5030,23 @@ export class CircuitCanvasRenderer {
   }
 
   private voltageColor(voltage: number): string {
-    const normalized = Math.max(
-      -1,
-      Math.min(1, voltage / Math.max(CircuitElm.voltageRange, 1e-12))
+    const range = Math.max(CircuitElm.voltageRange, 1e-12);
+    const finiteVoltage = Number.isNaN(voltage) ? 0 : voltage;
+    const index = Math.max(
+      0,
+      Math.min(
+        CircuitElm.colorScaleCount - 1,
+        Math.trunc(
+          (finiteVoltage + range) * (CircuitElm.colorScaleCount - 1) /
+            (range * 2)
+        )
+      )
     );
-    if (normalized > 0.02) {
-      return this.mixColor(this.neutralColor, this.positiveColor, normalized);
-    }
-    if (normalized < -0.02) {
-      return this.mixColor(
-        this.neutralColor,
-        this.negativeColor,
-        -normalized
-      );
-    }
-    return this.neutralColor;
+    const paletteValue =
+      index * 2 / CircuitElm.colorScaleCount - 1;
+    return paletteValue < 0
+      ? this.mixColor(this.neutralColor, this.negativeColor, -paletteValue)
+      : this.mixColor(this.neutralColor, this.positiveColor, paletteValue);
   }
 
   private mixColor(first: string, second: string, amount: number): string {
@@ -5063,7 +5066,7 @@ export class CircuitCanvasRenderer {
     const start = parse(first);
     const end = parse(second);
     const channel = (index: number) =>
-      Math.round(start[index] + (end[index] - start[index]) * amount);
+      Math.trunc(start[index] + (end[index] - start[index]) * amount);
     return `rgb(${channel(0)}, ${channel(1)}, ${channel(2)})`;
   }
 

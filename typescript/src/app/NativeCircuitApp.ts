@@ -2937,11 +2937,11 @@ export class NativeCircuitApp {
     );
     this.mouseWheelEdit = this.getStoredOption("mouse-wheel-edit", true);
     this.renderer.positiveColor =
-      localStorage.getItem("circuitjs1-ts-positive-color") ?? "#20ff40";
+      localStorage.getItem("circuitjs1-ts-positive-color") ?? "#00ff00";
     this.renderer.negativeColor =
-      localStorage.getItem("circuitjs1-ts-negative-color") ?? "#ff2828";
+      localStorage.getItem("circuitjs1-ts-negative-color") ?? "#ff0000";
     this.renderer.neutralColor =
-      localStorage.getItem("circuitjs1-ts-neutral-color") ?? "#a3a3a3";
+      localStorage.getItem("circuitjs1-ts-neutral-color") ?? "#808080";
     this.renderer.selectionColor =
       localStorage.getItem("circuitjs1-ts-selection-color") ?? "#38bdf8";
     this.renderer.currentColor =
