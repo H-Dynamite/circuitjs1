@@ -347,9 +347,8 @@ export class CircuitCanvasRenderer {
     selectionBox: DraftElement | null
   ): void {
     context.clearRect(0, 0, width, height);
-    context.fillStyle = this.whiteBackground ? "#ffffff" : "#050505";
+    context.fillStyle = this.whiteBackground ? "#ffffff" : "#000000";
     context.fillRect(0, 0, width, height);
-    this.drawGrid(context, width, height);
 
     elements.forEach((element, index) => {
       this.drawElement(
@@ -401,29 +400,6 @@ export class CircuitCanvasRenderer {
       this.line(context, 0, this.crosshair.y, width, this.crosshair.y);
       context.restore();
     }
-  }
-
-  private drawGrid(
-    context: CanvasRenderingContext2D,
-    width: number,
-    height: number
-  ): void {
-    const grid = (this.smallGrid ? 8 : 16) * this.viewport.scale;
-    if (grid < 9) {
-      return;
-    }
-    const startX =
-      ((this.viewport.offsetX % grid) + grid) % grid;
-    const startY =
-      ((this.viewport.offsetY % grid) + grid) % grid;
-    context.save();
-    context.fillStyle = this.whiteBackground ? "#d8dee8" : "#171717";
-    for (let x = startX; x < width; x += grid) {
-      for (let y = startY; y < height; y += grid) {
-        context.fillRect(Math.round(x), Math.round(y), 1, 1);
-      }
-    }
-    context.restore();
   }
 
   private drawElement(

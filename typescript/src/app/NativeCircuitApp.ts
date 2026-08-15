@@ -85,6 +85,17 @@ const DEFAULT_CIRCUIT = [
 
 const EMPTY_CIRCUIT = "$ 1 0.000005 10.2 50 5 43 5e-11";
 
+export function circuitGridSize(smallGrid: boolean): 8 | 16 {
+  return smallGrid ? 8 : 16;
+}
+
+export function snapToCircuitGrid(value: number, smallGrid: boolean): number {
+  const gridSize = circuitGridSize(smallGrid);
+  const gridRound = gridSize / 2 - 1;
+  const gridMask = ~(gridSize - 1);
+  return (Math.trunc(value) + gridRound) & gridMask;
+}
+
 type Tool = "select" | string;
 
 type ShortcutMap = Record<string, Tool>;
@@ -2171,7 +2182,7 @@ export class NativeCircuitApp {
         break;
       case "toggle-small-grid":
         this.renderer.smallGrid = !this.renderer.smallGrid;
-        this.gridSize = this.renderer.smallGrid ? 8 : 16;
+        this.gridSize = circuitGridSize(this.renderer.smallGrid);
         break;
       case "toggle-toolbar":
         this.root
@@ -2986,7 +2997,7 @@ export class NativeCircuitApp {
   }): void {
     this.renderer.showCurrent = flags.showCurrentDots;
     this.renderer.smallGrid = flags.smallGrid;
-    this.gridSize = flags.smallGrid ? 8 : 16;
+    this.gridSize = circuitGridSize(flags.smallGrid);
     this.renderer.showVoltage = flags.showVoltage;
     this.renderer.showPower = flags.showPower;
     this.renderer.showValues = flags.showValues;
@@ -3290,7 +3301,7 @@ export class NativeCircuitApp {
   }
 
   private snap(value: number): number {
-    return Math.round(value / this.gridSize) * this.gridSize;
+    return snapToCircuitGrid(value, this.renderer.smallGrid);
   }
 
   private onPointerDown(event: PointerEvent): void {
