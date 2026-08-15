@@ -16,7 +16,7 @@ describe("legacy centerCircuit camera fit", () => {
     });
   });
 
-  it("includes GateElm's Java hs2 bbox expansion", () => {
+  it("reads GateElm's Java hs2 bbox expansion from the element", () => {
     const gate = new XorGateElm(
       -16,
       720,
@@ -26,6 +26,7 @@ describe("legacy centerCircuit camera fit", () => {
       new StringTokenizer("")
     );
     gate.setPoints();
+    expect(gate.boundingBox).toEqual({ x: -16, y: 692, width: 129, height: 56 });
 
     const renderer = new CircuitCanvasRenderer();
     renderer.fit([gate], 1106, 665);

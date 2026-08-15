@@ -79,6 +79,18 @@ export class TextElm extends CircuitElm {
     this.lines = this.text.split(/\n|\\n/);
   }
 
+  public updateBoundingBox(lineWidths: number[], fontSize = this.size): void {
+    let currentY = this.y;
+    this.setBoundingBox(this.x, this.y, this.x, this.y);
+    for (const width of lineWidths) {
+      const textWidth = Math.trunc(width);
+      this.adjustBoundingBox(this.x, currentY - fontSize, this.x + textWidth, currentY + 3);
+      currentY += fontSize + 3;
+    }
+    this.x2 = this.boundingBox.x + this.boundingBox.width;
+    this.y2 = this.boundingBox.y + this.boundingBox.height;
+  }
+
   public override getPostCount(): number {
     return 0;
   }

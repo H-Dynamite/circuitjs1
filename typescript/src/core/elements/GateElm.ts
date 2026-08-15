@@ -186,6 +186,7 @@ export abstract class GateElm extends CircuitElm {
     }
     this.hs2 =
       this.gwidth * (Math.floor(this.inputCount / 2) + 1);
+    this.setBoundingBoxAroundPoints(this.point1, this.point2, this.hs2);
 
     if (this.isInverting()) {
       const distance = Math.max(this.dn, 1);

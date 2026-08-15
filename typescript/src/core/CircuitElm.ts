@@ -98,12 +98,33 @@ export class CircuitElm {
   }
 
   public initBoundingBox(): void {
-    this.boundingBox.setBounds(
-      Math.min(this.x, this.x2),
-      Math.min(this.y, this.y2),
-      Math.abs(this.x2 - this.x) + 1,
-      Math.abs(this.y2 - this.y) + 1
+    this.setBoundingBox(this.x, this.y, this.x2, this.y2);
+  }
+
+  public setBoundingBox(x1: number, y1: number, x2: number, y2: number): void {
+    if (x1 > x2) [x1, x2] = [x2, x1];
+    if (y1 > y2) [y1, y2] = [y2, y1];
+    this.boundingBox.setBounds(x1, y1, x2 - x1 + 1, y2 - y1 + 1);
+  }
+
+  public setBoundingBoxAroundPoints(point1: Point, point2: Point, width: number): void {
+    this.setBoundingBox(point1.x, point1.y, point2.x, point2.y);
+    const perpendicularX = Math.trunc(this.dpx1 * width);
+    const perpendicularY = Math.trunc(this.dpy1 * width);
+    this.adjustBoundingBox(
+      point1.x + perpendicularX, point1.y + perpendicularY,
+      point1.x - perpendicularX, point1.y - perpendicularY
     );
+  }
+
+  public adjustBoundingBox(x1: number, y1: number, x2: number, y2: number): void {
+    if (x1 > x2) [x1, x2] = [x2, x1];
+    if (y1 > y2) [y1, y2] = [y2, y1];
+    x1 = Math.min(this.boundingBox.x, x1);
+    y1 = Math.min(this.boundingBox.y, y1);
+    x2 = Math.max(this.boundingBox.x + this.boundingBox.width, x2);
+    y2 = Math.max(this.boundingBox.y + this.boundingBox.height, y2);
+    this.boundingBox.setBounds(x1, y1, x2 - x1, y2 - y1);
   }
 
   public allocNodes(): void {

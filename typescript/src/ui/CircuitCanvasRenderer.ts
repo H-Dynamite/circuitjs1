@@ -316,32 +316,6 @@ export class CircuitCanvasRenderer {
       minY = Math.min(minY, box.y);
       maxY = Math.max(maxY, box.y + box.height);
 
-      if (element instanceof GateElm) {
-        const perpendicularX = Math.trunc(element.dpx1 * element.hs2);
-        const perpendicularY = Math.trunc(element.dpy1 * element.hs2);
-        if (!centeredText) {
-          minX = Math.min(
-            minX,
-            element.point1.x + perpendicularX,
-            element.point1.x - perpendicularX
-          );
-          maxX = Math.max(
-            maxX,
-            element.point1.x + perpendicularX,
-            element.point1.x - perpendicularX
-          );
-        }
-        minY = Math.min(
-          minY,
-          element.point1.y + perpendicularY,
-          element.point1.y - perpendicularY
-        );
-        maxY = Math.max(
-          maxY,
-          element.point1.y + perpendicularY,
-          element.point1.y - perpendicularY
-        );
-      }
     }
     const circuitWidth = maxX - minX;
     const circuitHeight = maxY - minY;
@@ -2852,6 +2826,13 @@ export class CircuitCanvasRenderer {
     context.font = `${fontSize}px Arial`;
     context.textAlign = "left";
     context.textBaseline = "alphabetic";
+    const renderedFont = context.font;
+    context.font = `${element.size * this.viewport.scale}px Arial`;
+    element.updateBoundingBox(
+      element.lines.map((line) => context.measureText(line).width / this.viewport.scale),
+      element.size
+    );
+    context.font = renderedFont;
     element.lines.forEach((line, index) => {
       const y = position.y + index * (fontSize + 3);
       context.fillText(line, position.x, y);
