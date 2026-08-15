@@ -1276,7 +1276,8 @@ dialog::backdrop {
   gap: 7px;
 }
 
-.element-edit-control input {
+.element-edit-control input,
+.element-edit-control textarea {
   min-width: 0;
   width: 100%;
   box-sizing: border-box;

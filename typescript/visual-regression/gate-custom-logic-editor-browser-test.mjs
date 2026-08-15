@@ -97,7 +97,7 @@ const checkCustomLogic = async (format) => {
   await page.evaluate((source) => window.CircuitJS1TS.loadCircuit(source), sourceFor("custom", format));
   await drawAndEdit(page, "custom-logic");
   const dialog = page.locator("#element-edit-dialog");
-  assert.equal(await dialog.getByRole("button", { name: "Edit Model" }).count(), 0);
+  assert.equal(await dialog.getByRole("button", { name: "Edit Model" }).count(), 1);
   await dialog.locator('input[data-edit-switch="customLogicHighVoltage"]').fill("6");
   await dialog.locator('input[data-edit-switch="customLogicModelName"]').fill("alt-copy");
   await dialog.locator('button[type="submit"]').click();

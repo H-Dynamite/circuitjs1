@@ -143,4 +143,33 @@ describe("TextElm and LabeledNodeElm visible editors", () => {
     expect(element.model.rules).toBe("0=1\n1=0");
     expect(app.api.stepSimulation(1).steps).toBe(1);
   });
+
+  it("edits a CustomLogic model atomically through the visible model editor", () => {
+    const root = document.querySelector<HTMLElement>("#app")!;
+    const app = new NativeCircuitApp(root);
+    app.api.loadCircuit("$ 1 0.000005 10 50 5");
+    drawAndOpenEditor(root, app, "custom-logic");
+    root.querySelector<HTMLButtonElement>('[data-action="edit-custom-logic-model"]')!.click();
+    root.querySelector<HTMLInputElement>('[data-custom-logic-model="inputs"]')!.value = "A";
+    root.querySelector<HTMLInputElement>('[data-custom-logic-model="outputs"]')!.value = "Q";
+    root.querySelector<HTMLInputElement>('[data-custom-logic-model="infoText"]')!.value = "inverter";
+    const rules = root.querySelector<HTMLTextAreaElement>('[data-custom-logic-model="rules"]')!;
+    rules.value = "invalid";
+    root.querySelector<HTMLButtonElement>('#element-edit-form button[type="submit"]')!.click();
+    expect(root.querySelector("#element-edit-error")?.textContent).toContain("line 1");
+    rules.value = "0=1\n1=0";
+    root.querySelector<HTMLButtonElement>('#element-edit-form button[type="submit"]')!.click();
+    const model = (app.api.getElements()[0] as CustomLogicElm).model;
+    expect(model.inputs).toEqual(["A"]);
+    expect(model.outputs).toEqual(["Q"]);
+    expect(model.infoText).toBe("inverter");
+    expect(model.rules).toBe("0=1\n1=0");
+    const exported = app.api.exportCircuit();
+    const freshRoot = document.createElement("div");
+    document.body.append(freshRoot);
+    const fresh = new NativeCircuitApp(freshRoot);
+    fresh.api.loadCircuit(exported);
+    const restored = (fresh.api.getElements()[0] as CustomLogicElm).model;
+    expect(restored.rules).toBe("0=1\n1=0");
+  });
 });

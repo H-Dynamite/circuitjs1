@@ -517,6 +517,7 @@ export class NativeCircuitApp {
   /** Test-only clock fixture; never changes circuit state or drawing paths. */
   private visualRegressionSchedulerHold = false;
   private selectedIndex: number | null = null;
+  private editingCustomLogicModel: CustomLogicModel | null = null;
   private readonly selectedIndices = new Set<number>();
   private activeTool: Tool = "select";
   private dragMode: "selected" | "all" | "row" | "column" | "post" =
@@ -1794,6 +1795,7 @@ export class NativeCircuitApp {
   private openElementEditor(): void {
     if (this.editDisabled || this.selectedIndex === null) return;
     const element = this.runner.elements[this.selectedIndex];
+    this.editingCustomLogicModel = null;
     this.updateInspector();
 
     const dialog = this.requireElement(
@@ -1940,6 +1942,13 @@ export class NativeCircuitApp {
       addTextField("模型名称", element.modelName, "editSwitch", "customLogicModelName", "", {
         required: false
       });
+      const editModel = document.createElement("button");
+      editModel.type = "button";
+      editModel.className = "property-action";
+      editModel.dataset.action = "edit-custom-logic-model";
+      editModel.textContent = "Edit Model";
+      editModel.addEventListener("click", () => this.openCustomLogicModelEditor(element.model));
+      fields.append(editModel);
     } else {
       const sourceRows = this.root.querySelectorAll<HTMLElement>(
         "#element-properties .property-row"
@@ -1987,6 +1996,10 @@ export class NativeCircuitApp {
     const fields = this.requireElement("element-edit-fields", HTMLElement);
     const error = this.requireElement("element-edit-error", HTMLElement);
     const element = this.runner.elements[this.selectedIndex];
+    if (this.editingCustomLogicModel !== null) {
+      this.applyCustomLogicModelEditor(dialog, fields, error, this.editingCustomLogicModel);
+      return;
+    }
     const propertyValues: Array<{ property: string; value: number }> = [];
 
     for (const input of fields.querySelectorAll<HTMLInputElement>(
@@ -2150,6 +2163,88 @@ export class NativeCircuitApp {
     this.commitHistory();
     this.updateInspector();
     dialog.close();
+  }
+
+  private openCustomLogicModelEditor(model: CustomLogicModel): void {
+    this.editingCustomLogicModel = model;
+    this.requireElement("element-edit-title", HTMLElement).textContent = "Edit Model";
+    this.requireElement("element-edit-subtitle", HTMLElement).textContent = model.name;
+    const fields = this.requireElement("element-edit-fields", HTMLElement);
+    const error = this.requireElement("element-edit-error", HTMLElement);
+    error.textContent = "";
+    fields.replaceChildren();
+    const addField = (labelText: string, key: string, value: string, multiline = false): void => {
+      const label = document.createElement("label");
+      label.className = "element-edit-row";
+      const caption = document.createElement("span");
+      caption.textContent = labelText;
+      const control = document.createElement("span");
+      control.className = "element-edit-control";
+      const input = multiline ? document.createElement("textarea") : document.createElement("input");
+      if (input instanceof HTMLInputElement) input.type = "text";
+      else input.rows = 5;
+      input.value = value;
+      input.dataset.customLogicModel = key;
+      control.append(input);
+      label.append(caption, control);
+      fields.append(label);
+    };
+    addField("Inputs", "inputs", model.inputs.join(","));
+    addField("Outputs", "outputs", model.outputs.join(","));
+    addField("Info Text", "infoText", model.infoText);
+    addField("Definition", "rules", model.rules, true);
+    fields.querySelector<HTMLInputElement>("input")?.focus();
+  }
+
+  private applyCustomLogicModelEditor(
+    dialog: HTMLDialogElement,
+    fields: HTMLElement,
+    error: HTMLElement,
+    model: CustomLogicModel
+  ): void {
+    const value = (key: string): string =>
+      fields.querySelector<HTMLInputElement | HTMLTextAreaElement>(`[data-custom-logic-model="${key}"]`)?.value ?? "";
+    const list = (source: string): string[] => source.length === 0 ? [] : source.split(",");
+    const validationError = model.configure(
+      list(value("inputs")), list(value("outputs")), value("infoText"), value("rules")
+    );
+    if (validationError !== null) {
+      error.textContent = validationError;
+      fields.querySelector<HTMLTextAreaElement>('textarea[data-custom-logic-model="rules"]')?.focus();
+      return;
+    }
+    for (const candidate of this.runner.elements) {
+      if (candidate instanceof CustomLogicElm && candidate.modelName === model.name) {
+        candidate.model = model;
+        candidate.setupPins();
+        candidate.setPoints();
+      }
+    }
+    const textRecord = this.customLogicTextRecord(model);
+    this.runner.preservedTextRecords = this.runner.preservedTextRecords.map((record) => {
+      const recordFields = record.trim().split(/\s+/);
+      return recordFields[0] === "!" && CustomLogicModel.unescape(recordFields[1] ?? "") === model.name
+        ? textRecord : record;
+    });
+    this.runner.preservedXmlRecords = this.runner.preservedXmlRecords.map((record) =>
+      record.tagName === "clm" && record.attributes.nm === model.name
+        ? { ...record, attributes: { ...record.attributes, nm: model.name, f: String(model.flags),
+            in: model.inputs.join(","), o: model.outputs.join(","), if: model.infoText }, contents: model.rules }
+        : record
+    );
+    this.editingCustomLogicModel = null;
+    error.textContent = "";
+    this.runner.analyzed = false;
+    this.commitHistory();
+    this.updateInspector();
+    dialog.close();
+  }
+
+  private customLogicTextRecord(model: CustomLogicModel): string {
+    return ["!", CustomLogicModel.escape(model.name), model.flags,
+      CustomLogicModel.escape(model.inputs.join(",")),
+      CustomLogicModel.escape(model.outputs.join(",")),
+      CustomLogicModel.escape(model.infoText), CustomLogicModel.escape(model.rules)].join(" ");
   }
 
   private showContextMenu(event: MouseEvent): void {

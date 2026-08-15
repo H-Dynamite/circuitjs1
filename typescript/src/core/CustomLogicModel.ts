@@ -77,11 +77,13 @@ export class CustomLogicModel {
     model.parseRules();
   }
 
-  public parseRules(): void {
+  public parseRules(): string | null {
     this.rulesLeft = [];
     this.rulesRight = [];
     this.triState = false;
-    for (const sourceLine of this.rules.split(/\r?\n/)) {
+    const sourceLines = this.rules.split(/\r?\n/);
+    for (let lineIndex = 0; lineIndex < sourceLines.length; lineIndex += 1) {
+      const sourceLine = sourceLines[lineIndex];
       const line = sourceLine.toLowerCase().trim();
       if (line.length === 0 || line.startsWith("#")) continue;
       const sides = line.replace(/\s/g, "").split("=");
@@ -91,7 +93,7 @@ export class CustomLogicModel {
         sides[0].length > this.inputs.length + this.outputs.length ||
         sides[1].length !== this.outputs.length
       ) {
-        continue;
+        return `error on line ${lineIndex + 1}`;
       }
       const used = Array<boolean>(26).fill(false);
       let normalized = "";
@@ -102,19 +104,34 @@ export class CustomLogicModel {
         }
         const index = character.charCodeAt(0) - 97;
         if (index < 0 || index >= 26) {
-          normalized = "";
-          break;
+          return `error on line ${lineIndex + 1}`;
         }
         normalized += used[index]
           ? character.toUpperCase()
           : character;
         used[index] = true;
       }
-      if (normalized.length === 0) continue;
       this.rulesLeft.push(normalized);
       this.rulesRight.push(sides[1]);
       if (sides[1].includes("_")) this.triState = true;
     }
+    return null;
+  }
+
+  public configure(inputs: string[], outputs: string[], infoText: string, rules: string): string | null {
+    const previous = { inputs: this.inputs, outputs: this.outputs, infoText: this.infoText, rules: this.rules };
+    this.inputs = inputs;
+    this.outputs = outputs;
+    this.infoText = infoText;
+    this.rules = rules;
+    const error = this.parseRules();
+    if (error === null) return null;
+    this.inputs = previous.inputs;
+    this.outputs = previous.outputs;
+    this.infoText = previous.infoText;
+    this.rules = previous.rules;
+    this.parseRules();
+    return error;
   }
 
   private static listToArray(value: string): string[] {
