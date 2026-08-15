@@ -152,42 +152,54 @@ function normalizedVisualRegions(legacy, ts) {
   };
 }
 async function legacyLoad(page, baseUrl, id, source, runningControls = false) {
+  // Install before GWT boots. The old application otherwise begins its timer
+  // during startup, before the runner can import and freeze the fixture.
+  await page.addInitScript(() => {
+    window.oncircuitjsloaded = (bridge) => bridge.setSimRunning(false);
+  });
   const expectedPath = `/legacy/circuitjs1/circuits/${id}`;
   const requested = page.waitForResponse((response) => new URL(response.url()).pathname === expectedPath, { timeout: 20_000 });
   const url = new URL("/legacy/circuitjs.html", baseUrl); url.searchParams.set("startCircuit", id);
   await page.goto(url.toString(), { waitUntil: "domcontentloaded", timeout: 30_000 });
   const response = await requested; if (!response.ok()) throw new Error(`Legacy circuit request failed: ${response.status()} ${id}`);
   const actual = await response.text(); if (sha(actual) !== sha(source)) throw new Error(`Legacy source hash mismatch: ${id}`);
-  await page.evaluate(() => {
-    // Stop before changing the visual test layout; the runner resumes after
-    // the fixed-step capture contract completes.
-    const pause = [...document.querySelectorAll("input[type=checkbox]")]
-      .find((input) => /pause|stop/i.test(input.getAttribute("title") ?? ""));
-    if (pause instanceof HTMLInputElement && !pause.checked) pause.click();
-    if (typeof window.CircuitJS1?.setVisualRegressionLayout !== "function") throw new Error("Legacy visual layout bridge missing; rebuild the GWT baseline");
-    // 1280px viewport - 174px TS sidebar = 1106px. The GWT layout API does
-    // the real backing-store resize; do not alter canvas CSS from the test.
-    window.CircuitJS1.setVisualRegressionLayout(174, 665, true);
-  });
-  await stableCanvas(page);
-  const legacyState = await page.evaluate((fixedSteps) => {
+  await page.evaluate((input) => {
     const bridge = window.CircuitJS1;
-    if (typeof bridge?.setSimRunning !== "function" || typeof bridge?.isRunning !== "function" || typeof bridge?.stepSimulation !== "function") {
-      throw new Error("Legacy visual capture bridge missing simulation controls");
+    if (typeof bridge?.setVisualRegressionLayout !== "function" || typeof bridge?.importCircuit !== "function" || typeof bridge?.setVisualRegressionSchedulerHold !== "function") {
+      throw new Error("Legacy visual capture bridge missing; rebuild the local GWT baseline");
     }
     bridge.setSimRunning(false);
+    bridge.setVisualRegressionSchedulerHold(true);
+    bridge.importCircuit(input, false);
+    bridge.setSimRunning(false);
+    // 1280px viewport - 174px TS sidebar = 1106px. The GWT layout API does
+    // the real backing-store resize; do not alter canvas CSS from the test.
+    bridge.setVisualRegressionLayout(174, 665, true);
+  }, source);
+  await stableCanvas(page);
+  const legacyState = await page.evaluate(({ fixedSteps }) => {
+    const bridge = window.CircuitJS1;
+    if (typeof bridge?.setSimRunning !== "function" || typeof bridge?.isRunning !== "function" || typeof bridge?.stepSimulation !== "function" || typeof bridge?.getTime !== "function" || typeof bridge?.getTimeStep !== "function" || typeof bridge?.setVisualRegressionSchedulerHold !== "function") {
+      throw new Error("Legacy visual capture requires deterministic time and scheduler-hold bridge methods");
+    }
+    bridge.setSimRunning(false);
+    bridge.setVisualRegressionSchedulerHold(true);
+    const initialTime = bridge.getTime();
+    const initialTimeStep = bridge.getTimeStep();
     bridge.stepSimulation(fixedSteps);
+    const finalTime = bridge.getTime();
+    const finalTimeStep = bridge.getTimeStep();
     bridge.setSimRunning(true);
     return {
       layout: bridge?.getVisualRegressionLayout?.(),
-      running: bridge.isRunning(), fixedSteps,
-      simulationTime: typeof bridge?.getTime === "function" ? bridge.getTime() : null
+      running: bridge.isRunning(), fixedSteps, initialTime, initialTimeStep,
+      finalTime, finalTimeStep, simulationTime: finalTime, schedulerHeld: true
     };
-  }, STATIC_CAPTURE_STEPS);
-  const { layout, running, fixedSteps, simulationTime } = legacyState;
+  }, { fixedSteps: STATIC_CAPTURE_STEPS });
+  const { layout, running, fixedSteps, simulationTime, ...timeState } = legacyState;
   if (!visualLayoutStatus(layout)) throw new Error(`Invalid legacy visual layout: ${JSON.stringify(layout)}`);
   if (running !== true || fixedSteps !== STATIC_CAPTURE_STEPS) throw new Error(`Legacy visual capture state mismatch: ${JSON.stringify(legacyState)}`);
-  return { requestedPath: expectedPath, sourceSha256: sha(actual), paused: false, running, fixedSteps, simulationTime, canvas: layout.canvas, visualLayout: layout };
+  return { requestedPath: expectedPath, sourceSha256: sha(actual), paused: false, running, fixedSteps, simulationTime, ...timeState, canvas: layout.canvas, visualLayout: layout };
 }
 function textElementsIn(source) {
   return source
@@ -223,7 +235,16 @@ async function expectedElementsIn(page, source) {
 async function tsLoad(page, baseUrl, source, runningControls = false) {
   await page.goto(baseUrl, { waitUntil: "networkidle", timeout: 30_000 });
   await page.waitForFunction(() => typeof window.CircuitJS1TS?.loadCircuit === "function", undefined, { timeout: 20_000 });
-  await page.evaluate((input) => window.CircuitJS1TS.loadCircuit(input), source);
+  await page.evaluate((input) => {
+    const app = window.CircuitJS1TS;
+    if (typeof app?.setVisualRegressionSchedulerHold !== "function") {
+      throw new Error("TypeScript visual capture scheduler-hold bridge missing");
+    }
+    app.setRunning(false);
+    app.setVisualRegressionSchedulerHold(true);
+    app.loadCircuit(input);
+    app.setRunning(false);
+  }, source);
   const state = await page.evaluate(() => { window.CircuitJS1TS.setRunning(false); const exported = window.CircuitJS1TS.exportCircuit(); return { elementCount: window.CircuitJS1TS.getElements().length, exportedLength: exported.length, exportedPrefix: exported.slice(0, 160), exportedCircuit: exported }; });
   const expectedElementCount = await expectedElementsIn(page, source);
   // Element-count parity is a product validation failure, not a reason to
@@ -244,17 +265,19 @@ async function tsLoad(page, baseUrl, source, runningControls = false) {
   if (!visualLayoutStatus(visualLayout)) throw new Error(`Invalid TypeScript visual layout: ${JSON.stringify(visualLayout)}`);
   const captureState = await page.evaluate((fixedSteps) => {
     const app = window.CircuitJS1TS;
-    if (typeof app?.setRunning !== "function" || typeof app?.stepSimulation !== "function" || typeof app?.getDynamicSnapshot !== "function") {
-      throw new Error("TypeScript visual capture bridge missing simulation controls");
+    if (typeof app?.setRunning !== "function" || typeof app?.stepSimulation !== "function" || typeof app?.getDynamicSnapshot !== "function" || typeof app?.setVisualRegressionSchedulerHold !== "function") {
+      throw new Error("TypeScript visual capture requires deterministic time and scheduler-hold bridge methods");
     }
     app.setRunning(false);
+    app.setVisualRegressionSchedulerHold(true);
+    const initial = app.getDynamicSnapshot();
     const stepped = app.stepSimulation(fixedSteps);
+    const final = app.getDynamicSnapshot();
     app.setRunning(true);
-    const snapshot = app.getDynamicSnapshot();
-    return { running: snapshot.running, fixedSteps: stepped?.steps, simulationTime: snapshot.time };
+    return { running: app.getDynamicSnapshot().running, fixedSteps: stepped?.steps, initialTime: initial.time, initialTimeStep: initial.timeStep, finalTime: final.time, finalTimeStep: final.timeStep, simulationTime: final.time, schedulerHeld: true };
   }, STATIC_CAPTURE_STEPS);
   if (captureState.running !== true || captureState.fixedSteps !== STATIC_CAPTURE_STEPS) throw new Error(`TypeScript visual capture state mismatch: ${JSON.stringify(captureState)}`);
-  return { inputSha256: sha(source), expectedElementCount, elementCountError, ...summary, exportedSha256: sha(exportedCircuit), paused: false, ...captureState, canvas, visualLayout };
+  return { inputSha256: sha(source), expectedElementCount, elementCountError, ...summary, exportedSha256: sha(exportedCircuit), paused: false, ...captureState, canvas, visualLayout, viewport: visualLayout.viewport };
 }
 function assertStaticCaptureState(legacy, ts) {
   const state = { legacy: { running: legacy?.running, fixedSteps: legacy?.fixedSteps }, ts: { running: ts?.running, fixedSteps: ts?.fixedSteps } };
@@ -262,6 +285,39 @@ function assertStaticCaptureState(legacy, ts) {
     throw new Error(`Static visual capture requires both products RUN after ${STATIC_CAPTURE_STEPS} fixed steps; got ${JSON.stringify(state)}`);
   }
   return state;
+}
+function timeClose(left, right) {
+  return Number.isFinite(left) && Number.isFinite(right) && Math.abs(left - right) <= Math.max(1e-15, Math.max(Math.abs(left), Math.abs(right)) * 1e-9);
+}
+function staticTimeParity(legacy, ts) {
+  const products = { legacy, ts };
+  const perProduct = Object.fromEntries(Object.entries(products).map(([name, state]) => {
+    const expectedFinalTime = state.initialTime + STATIC_CAPTURE_STEPS * state.initialTimeStep;
+    return [name, {
+      initialTime: state.initialTime, initialTimeStep: state.initialTimeStep,
+      finalTime: state.finalTime, finalTimeStep: state.finalTimeStep, expectedFinalTime,
+      ticksMatch: state.fixedSteps === STATIC_CAPTURE_STEPS,
+      startsAtZero: timeClose(state.initialTime, 0),
+      fixedTimeStep: timeClose(state.initialTimeStep, state.finalTimeStep),
+      elapsedMatchesTicks: timeClose(state.finalTime, expectedFinalTime),
+      schedulerHeld: state.schedulerHeld === true
+    }];
+  }));
+  const checks = {
+    legacy: Object.values(perProduct.legacy).filter((value) => typeof value === "boolean").every(Boolean),
+    ts: Object.values(perProduct.ts).filter((value) => typeof value === "boolean").every(Boolean),
+    initialTime: timeClose(legacy.initialTime, ts.initialTime),
+    timeStep: timeClose(legacy.initialTimeStep, ts.initialTimeStep),
+    finalTime: timeClose(legacy.finalTime, ts.finalTime)
+  };
+  return { passed: Object.values(checks).every(Boolean), checks, products: perProduct };
+}
+function applyStaticTimeParity(result) {
+  result.staticTimeParity = staticTimeParity(result.source.legacy, result.source.ts);
+  if (!result.staticTimeParity.passed) {
+    result.status = "failed";
+    result.error = [result.error, `Static time parity mismatch: ${JSON.stringify(result.staticTimeParity)}`].filter(Boolean).join("\n");
+  }
 }
 async function popupGeometry(locator, label) {
   const box = await locator.boundingBox();
@@ -378,7 +434,21 @@ async function diffRegions(context, files, legacyLayout, tsLayout) {
   }
   return metrics;
 }
-function html(results, output) { const image = (result, kind) => result.files?.[kind] ? `<a href="${relative(output,result.files[kind]).split(sep).join("/")}"><img src="${relative(output,result.files[kind]).split(sep).join("/")}"></a>` : "-"; const regions=(result)=>[result.runControlsState ? `run states: legacy=${String(result.runControlsState.legacy)}, ts=${String(result.runControlsState.ts)}` : undefined, result.regionMetrics ? Object.entries(result.regionMetrics).map(([name,value])=>`${name}: ${(value.diffPixelRatio*100).toFixed(2)}% / ${(value.mae*100).toFixed(3)}%`).join("<br>") : undefined].filter(Boolean).join("<br>") || "-"; return `<!doctype html><meta charset="utf-8"><style>body{font:14px system-ui}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:6px;vertical-align:top}img{width:200px}</style><p>Review when changed pixels > ${REVIEW_DIFF_PIXEL_RATIO * 100}% or MAE > ${REVIEW_MAE * 100}%. Full-page metrics are diagnostic; region metrics localize menu chrome, workspace, and sidebar differences.</p><table><tr><th>Scenario</th><th>Status</th><th>Baseline</th><th>Full diff</th><th>Run states / regions</th><th>Legacy</th><th>TS</th><th>Diff</th><th>Error</th></tr>${results.map((r)=>`<tr><td>${r.id}</td><td>${r.status}</td><td>${r.baseline?.valid===false?"invalid-baseline":r.baseline?.valid===true?"comparable":"-"}</td><td>${r.metrics ? `${(r.metrics.diffPixelRatio*100).toFixed(2)}% / ${(r.metrics.mae*100).toFixed(3)}%` : "-"}</td><td>${regions(r)}</td><td>${image(r,"legacy")}</td><td>${image(r,"ts")}</td><td>${image(r,"diff")}</td><td>${r.error??""}</td></tr>`).join("")}</table>`; }
+function html(results, output) {
+  const image = (result, kind) => result.files?.[kind] ? `<a href="${relative(output,result.files[kind]).split(sep).join("/")}"><img src="${relative(output,result.files[kind]).split(sep).join("/")}"></a>` : "-";
+  const timeParity = (result) => {
+    const parity = result.staticTimeParity;
+    if (!parity) return undefined;
+    const { legacy, ts } = parity.products;
+    return `time parity: ${parity.passed ? "passed" : "FAILED"}<br>scheduler held / solver frozen: legacy=${String(legacy.schedulerHeld)}, ts=${String(ts.schedulerHeld)}<br>legacy: ${legacy.initialTime} + ${STATIC_CAPTURE_STEPS}×${legacy.initialTimeStep} = ${legacy.finalTime}<br>ts: ${ts.initialTime} + ${STATIC_CAPTURE_STEPS}×${ts.initialTimeStep} = ${ts.finalTime}`;
+  };
+  const regions = (result) => [
+    result.runControlsState ? `run states: legacy=${String(result.runControlsState.legacy)}, ts=${String(result.runControlsState.ts)}` : undefined,
+    timeParity(result),
+    result.regionMetrics ? Object.entries(result.regionMetrics).map(([name, value]) => `${name}: ${(value.diffPixelRatio * 100).toFixed(2)}% / ${(value.mae * 100).toFixed(3)}%`).join("<br>") : undefined
+  ].filter(Boolean).join("<br>") || "-";
+  return `<!doctype html><meta charset="utf-8"><style>body{font:14px system-ui}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:6px;vertical-align:top}img{width:200px}</style><p>Review when changed pixels > ${REVIEW_DIFF_PIXEL_RATIO * 100}% or MAE > ${REVIEW_MAE * 100}%. Full-page metrics are diagnostic; region metrics localize menu chrome, workspace, and sidebar differences. Static captures require matching reset time, timestep, fixed ticks, and final time.</p><table><tr><th>Scenario</th><th>Status</th><th>Baseline</th><th>Full diff</th><th>Run states / regions</th><th>Legacy</th><th>TS</th><th>Diff</th><th>Error</th></tr>${results.map((r) => `<tr><td>${r.id}</td><td>${r.status}</td><td>${r.baseline?.valid === false ? "invalid-baseline" : r.baseline?.valid === true ? "comparable" : "-"}</td><td>${r.metrics ? `${(r.metrics.diffPixelRatio * 100).toFixed(2)}% / ${(r.metrics.mae * 100).toFixed(3)}%` : "-"}</td><td>${regions(r)}</td><td>${image(r, "legacy")}</td><td>${image(r, "ts")}</td><td>${image(r, "diff")}</td><td>${r.error ?? ""}</td></tr>`).join("")}</table>`;
+}
 
 export async function run() {
   try {
@@ -409,16 +479,17 @@ export async function run() {
         await deadline(`Menu ${entry[0]} capture`, MENU_CAPTURE_TIMEOUT_MS, async () => {
           result.source={legacy:await legacyLoad(menuLegacyPage,baseUrl,first.id,firstSource)};
           result.menu.legacy=await verifyMenu(menuLegacyPage,"legacy",entry,index);
-          await shot(menuLegacyPage,files.legacy);
           result.source.ts=await tsLoad(menuTsPage,baseUrl,firstSource);
           result.staticCaptureState=assertStaticCaptureState(result.source.legacy,result.source.ts);
           result.menu.ts=await verifyMenu(menuTsPage,"ts",entry,index);
           if (entry[0] === "file") {
             applyFilePopupMetric(result, result.menu.ts.popup);
           }
+          await shot(menuLegacyPage,files.legacy);
           await shot(menuTsPage,files.ts);
           result.baseline=comparableLayout(result.source.legacy.visualLayout,result.source.ts.visualLayout);
           if(options.diff){result.metrics=await diff(context,files.legacy,files.ts,files.diff);result.regionMetrics=await diffRegions(context,files,result.source.legacy.visualLayout,result.source.ts.visualLayout)}
+          applyStaticTimeParity(result);
           applyTsValidation(result);
           applyVisualOutcome(result, result.baseline.valid, Boolean(result.metrics&&(result.metrics.diffPixelRatio>REVIEW_DIFF_PIXEL_RATIO||result.metrics.mae>REVIEW_MAE)));
         });
@@ -426,7 +497,47 @@ export async function run() {
       finally { addMonitorFailures(result,[menuLegacyWatch,menuTsWatch]); await menuLegacyPage.close().catch(() => {}); await menuTsPage.close().catch(() => {}); }
       await writeFile(join(options.output,"metadata",`${nameFor(id)}.json`),JSON.stringify(result,null,2));results.push(result);console.log(`[${result.status}] menu ${entry[0]}`);
     }
-    for(const scenario of selected){const files=filesFor(options.output,nameFor(scenario.id)),old=options.keepOutput&&await previous(options.output,scenario.id,files);if(old){applyMenuStripGate(old,options.menuStripGate);applyRunControlsGate(old,options.runControlsGate);results.push(old);console.log(`[resumed] ${scenario.id}`);continue}const source=await readFile(scenario.file,"utf8"),result={id:scenario.id,status:"passed",captureStatus:"passed",files,error:undefined,source:{inputSha256:sha(source)}};legacyWatch.reset();tsWatch.reset();try{result.source.legacy=await legacyLoad(legacyPage,baseUrl,scenario.id,source,options.runControlsGate);await shot(legacyPage,files.legacy);result.source.ts=await tsLoad(tsPage,baseUrl,source,options.runControlsGate);result.staticCaptureState=assertStaticCaptureState(result.source.legacy,result.source.ts);result.runControlsState={legacy:result.source.legacy.running,ts:result.source.ts.running};await shot(tsPage,files.ts);result.baseline=comparableLayout(result.source.legacy.visualLayout,result.source.ts.visualLayout);if(options.diff){result.metrics=await diff(context,files.legacy,files.ts,files.diff);result.regionMetrics=await diffRegions(context,files,result.source.legacy.visualLayout,result.source.ts.visualLayout)}applyTsValidation(result);applyVisualOutcome(result,result.baseline.valid,Boolean(result.metrics&&(result.metrics.diffPixelRatio>REVIEW_DIFF_PIXEL_RATIO||result.metrics.mae>REVIEW_MAE)))}catch(error){result.status="failed";result.captureStatus="failed";result.error=errorText(error)}addMonitorFailures(result,[legacyWatch,tsWatch]);applyMenuStripGate(result,options.menuStripGate);applyRunControlsGate(result,options.runControlsGate);await writeFile(join(options.output,"metadata",`${nameFor(scenario.id)}.json`),JSON.stringify(result,null,2));results.push(result);console.log(`[${result.status}] ${scenario.id}`)}
+    for (const scenario of selected) {
+      const files = filesFor(options.output, nameFor(scenario.id));
+      const old = options.keepOutput && await previous(options.output, scenario.id, files);
+      if (old) {
+        applyMenuStripGate(old, options.menuStripGate);
+        applyRunControlsGate(old, options.runControlsGate);
+        results.push(old);
+        console.log(`[resumed] ${scenario.id}`);
+        continue;
+      }
+      const source = await readFile(scenario.file, "utf8");
+      const result = { id: scenario.id, status: "passed", captureStatus: "passed", files, error: undefined, source: { inputSha256: sha(source) } };
+      legacyWatch.reset();
+      tsWatch.reset();
+      try {
+        result.source.legacy = await legacyLoad(legacyPage, baseUrl, scenario.id, source, options.runControlsGate);
+        result.source.ts = await tsLoad(tsPage, baseUrl, source, options.runControlsGate);
+        result.staticCaptureState = assertStaticCaptureState(result.source.legacy, result.source.ts);
+        result.runControlsState = { legacy: result.source.legacy.running, ts: result.source.ts.running };
+        await shot(legacyPage, files.legacy);
+        await shot(tsPage, files.ts);
+        result.baseline = comparableLayout(result.source.legacy.visualLayout, result.source.ts.visualLayout);
+        if (options.diff) {
+          result.metrics = await diff(context, files.legacy, files.ts, files.diff);
+          result.regionMetrics = await diffRegions(context, files, result.source.legacy.visualLayout, result.source.ts.visualLayout);
+        }
+        applyStaticTimeParity(result);
+        applyTsValidation(result);
+        applyVisualOutcome(result, result.baseline.valid, Boolean(result.metrics && (result.metrics.diffPixelRatio > REVIEW_DIFF_PIXEL_RATIO || result.metrics.mae > REVIEW_MAE)));
+      } catch (error) {
+        result.status = "failed";
+        result.captureStatus = "failed";
+        result.error = errorText(error);
+      }
+      addMonitorFailures(result, [legacyWatch, tsWatch]);
+      applyMenuStripGate(result, options.menuStripGate);
+      applyRunControlsGate(result, options.runControlsGate);
+      await writeFile(join(options.output, "metadata", `${nameFor(scenario.id)}.json`), JSON.stringify(result, null, 2));
+      results.push(result);
+      console.log(`[${result.status}] ${scenario.id}`);
+    }
   } finally { await context.close();await browser.close();await server.close(); }
   const summary={passed:results.filter((r)=>r.status==="passed").length,review:results.filter((r)=>r.status==="review").length,invalidBaseline:results.filter((r)=>r.status==="invalid-baseline").length,failed:results.filter((r)=>r.status==="failed").length}; const report={generatedAt:new Date().toISOString(),viewport:VIEWPORT,thresholds:{REVIEW_DIFF_PIXEL_RATIO,REVIEW_MAE,MENU_STRIP_MAE:options.menuStripGate?MENU_STRIP_MAE:undefined,RUN_CONTROLS_MAE:options.runControlsGate?RUN_CONTROLS_MAE:undefined},execution:{mode:options.runControlsGate?"run-controls-gate":options.menuStripGate?"menu-strip-gate":options.strict?"strict-gate":"review-collection",strict:options.strict,menuStripGate:options.menuStripGate,runControlsGate:options.runControlsGate,exitNonZeroWhen:options.strict?"review, invalid-baseline, or failed":"invalid-baseline or failed"},source:{totalScenarios:all.length,capturedScenarios:selected.length},summary,results}; await writeFile(join(options.output,"report.json"),JSON.stringify(report,null,2));await writeFile(join(options.output,"report.html"),html(results,options.output));console.log(`Report: ${join(options.output,"report.html")}`);if(summary.failed||summary.invalidBaseline||(options.strict&&summary.review))process.exitCode=1;
 }

@@ -335,6 +335,12 @@ export interface NativeCircuitApi {
   getElementClickPoint(index: number): { x: number; y: number };
   /** Advance a paused simulation by a deterministic number of solver steps. */
   stepSimulation(steps?: number): { time: number; steps: number };
+  /**
+   * Regression-only scheduler hold.  It leaves the real RUN control active
+   * while preventing the browser frame loop from adding unaccounted solver
+   * ticks before a screenshot is taken.
+   */
+  setVisualRegressionSchedulerHold(hold: boolean): void;
   /** Capture numerical state after a real UI action without exposing core APIs. */
   getDynamicSnapshot(): DynamicCircuitSnapshot;
   /** Test-only solver trace; used only by --diagnostic visual regression. */
@@ -419,6 +425,8 @@ export class NativeCircuitApp {
   private toolShortcuts: ShortcutMap = { ...DEFAULT_TOOL_SHORTCUTS };
   private runner: CircuitRunner;
   private running = true;
+  /** Test-only clock fixture; never changes circuit state or drawing paths. */
+  private visualRegressionSchedulerHold = false;
   private selectedIndex: number | null = null;
   private readonly selectedIndices = new Set<number>();
   private activeTool: Tool = "select";
@@ -548,6 +556,9 @@ export class NativeCircuitApp {
       getElementRangeClickPoint: (index) => this.getElementRangeClickPoint(index),
       getVisualRegressionLayout: () => this.getVisualRegressionLayout(),
       stepSimulation: (steps) => this.stepSimulation(steps),
+      setVisualRegressionSchedulerHold: (hold) => {
+        this.visualRegressionSchedulerHold = hold;
+      },
       getDynamicSnapshot: () => this.getDynamicSnapshot(),
       beginDiagnosticTrace: () => this.runner.beginDiagnosticTrace(),
       recordDiagnosticTraceSnapshot: () => this.runner.recordDiagnosticTraceSnapshot(),
@@ -1088,6 +1099,12 @@ export class NativeCircuitApp {
     // UIManager recentres the circuit after a resize.  Refit on the next
     // frame so CSS layout has settled before reading the canvas dimensions.
     window.addEventListener("resize", () =>
+      requestAnimationFrame(() => this.fitToView())
+    );
+    // A fullscreen transition can change the root's available canvas size
+    // without delivering a window resize first.  Preserve the user's camera
+    // while that event is being handled; fit once on its next layout frame.
+    document.addEventListener("fullscreenchange", () =>
       requestAnimationFrame(() => this.fitToView())
     );
     window.addEventListener("blur", () => {
@@ -4137,7 +4154,7 @@ export class NativeCircuitApp {
   private animationFrame(now: number): void {
     const elapsed = Math.min(0.1, (now - this.lastFrameTime) / 1000);
     this.lastFrameTime = now;
-    if (this.running && elapsed > 0) {
+    if (this.running && !this.visualRegressionSchedulerHold && elapsed > 0) {
       try {
         const simulationStarted = performance.now();
         const frameBudget = 1000 / this.minimumFrameRate;
@@ -4163,7 +4180,9 @@ export class NativeCircuitApp {
         this.setRunning(false);
       }
     }
-    this.render(this.running ? elapsed * 1000 : 0);
+    this.render(
+      this.running && !this.visualRegressionSchedulerHold ? elapsed * 1000 : 0
+    );
     requestAnimationFrame((time) => this.animationFrame(time));
   }
 
@@ -4982,25 +5001,12 @@ export class NativeCircuitApp {
   }
 
   /**
-   * Match the Edit > Center Circuit command: it recentres the existing view
-   * without changing the user's zoom. `fitToView()` is reserved for initial
-   * loading and viewport resize, where establishing a scale is intentional.
+   * Match legacy `UIManager.centerCircuit()`.  Despite the menu label, the
+   * original command recalculates both the translation and scale; the same
+   * routine is also used after a load and during a recent resize.
    */
   private centerCircuit(): void {
-    this.resizeCanvases();
-    const { elements } = this.runner;
-    const scale = this.renderer.viewport.scale;
-    if (elements.length === 0) {
-      this.renderer.viewport.offsetX = this.canvas.clientWidth / 2;
-      this.renderer.viewport.offsetY = this.canvas.clientHeight / 2;
-      return;
-    }
-    const xs = elements.flatMap((element) => [element.x, element.x2]);
-    const ys = elements.flatMap((element) => [element.y, element.y2]);
-    const centerX = (Math.min(...xs) + Math.max(...xs)) / 2;
-    const centerY = (Math.min(...ys) + Math.max(...ys)) / 2;
-    this.renderer.viewport.offsetX = this.canvas.clientWidth / 2 - centerX * scale;
-    this.renderer.viewport.offsetY = this.canvas.clientHeight / 2 - centerY * scale;
+    this.fitToView();
   }
 
   private setTool(tool: Tool): void {

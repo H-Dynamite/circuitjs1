@@ -4,10 +4,6 @@ import { createServer } from "vite";
 
 const ROOT = process.cwd();
 
-function distance(first, second) {
-  return Math.hypot(second.x - first.x, second.y - first.y);
-}
-
 const server = await createServer({
   root: ROOT,
   logLevel: "error",
@@ -86,22 +82,21 @@ try {
   await open(edit);
   assert.equal(await enabled("paste"), true, "Paste enables after visible Copy");
 
-  // Center Circuit must translate only. Wheel zoom is real pointer input;
-  // proportional element distance is an observable scale invariant.
+  // Legacy UIManager.centerCircuit() recalculates the same fitted transform
+  // used when loading a circuit; it does not preserve a user wheel zoom.
   const canvas = page.locator("#circuit-canvas");
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  const fitted = await page.evaluate(() => window.CircuitJS1TS.getVisualRegressionLayout().viewport);
   await canvas.hover({ position: { x: 200, y: 200 } });
   await page.mouse.wheel(0, -300);
-  const before = await page.evaluate(() => [
-    window.CircuitJS1TS.getElementClickPoint(0),
-    window.CircuitJS1TS.getElementClickPoint(1)
-  ]);
+  const before = await page.evaluate(() => window.CircuitJS1TS.getVisualRegressionLayout().viewport);
+  assert.ok(before.scale > fitted.scale, "wheel zoom changes the native camera before Center Circuit");
   await open(edit);
   await action("fit").click();
-  const after = await page.evaluate(() => [
-    window.CircuitJS1TS.getElementClickPoint(0),
-    window.CircuitJS1TS.getElementClickPoint(1)
-  ]);
-  assert.ok(Math.abs(distance(...before) - distance(...after)) < 0.001, "Center Circuit does not change zoom scale");
+  const after = await page.evaluate(() => window.CircuitJS1TS.getVisualRegressionLayout().viewport);
+  assert.ok(Math.abs(after.scale - fitted.scale) < 0.001, "visible Edit > Center Circuit restores the fitted legacy scale");
+  assert.ok(Math.abs(after.offsetX - fitted.offsetX) < 0.001, "visible Edit > Center Circuit restores the fitted legacy X offset");
+  assert.ok(Math.abs(after.offsetY - fitted.offsetY) < 0.001, "visible Edit > Center Circuit restores the fitted legacy Y offset");
 
   // ThreePhaseMotor explicitly rejects both flips. MouseManager checks all
   // elements when no specific selection exists; Select All gives the same

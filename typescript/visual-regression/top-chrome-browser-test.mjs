@@ -205,7 +205,54 @@ try {
   await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   const wideViewport = await page.evaluate(() => window.CircuitJS1TS.getVisualRegressionLayout().viewport);
   approximately(wideViewport.scale, 530 / 1101, "wide framing stops reserving the narrow scope band");
+  // The visible Fullscreen menu action is backed by a small compatible
+  // fullscreen shim: headless Chromium cannot grant a real fullscreen
+  // request, but this exercises the browser's success and exit events.  Both
+  // events must refit on the following frame after a user zoom.
   await page.setViewportSize(CASES[0].viewport);
+  await page.evaluate((source) => window.CircuitJS1TS.loadCircuit(source), tallCircuit);
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  await page.evaluate(() => {
+    let fullscreenElement = null;
+    Object.defineProperty(document, "fullscreenElement", { configurable: true, get: () => fullscreenElement });
+    const root = document.querySelector(".native-app");
+    if (!(root instanceof HTMLElement)) throw new Error("Missing native app root");
+    root.requestFullscreen = async () => { fullscreenElement = root; document.dispatchEvent(new Event("fullscreenchange")); };
+    document.exitFullscreen = async () => { fullscreenElement = null; document.dispatchEvent(new Event("fullscreenchange")); };
+  });
+  const openMenuAction = async (menuIndex, action) => {
+    const menu = page.locator(".menu-bar > details").nth(menuIndex);
+    await menu.locator("summary").evaluate((summary) => summary.click());
+    await menu.locator(`[data-action="${action}"]`).evaluate((button) => button.click());
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  };
+  const fullscreenCanvas = page.locator("#circuit-canvas");
+  await fullscreenCanvas.focus();
+  await page.keyboard.press("+");
+  const fullscreenZoom = await page.evaluate(() => window.CircuitJS1TS.getVisualRegressionLayout().viewport.scale);
+  await page.evaluate(() => document.querySelector(".native-app")?.requestFullscreen());
+  assert.notEqual(await page.evaluate(() => document.fullscreenElement), null, "fullscreen shim entered");
+  approximately(await page.evaluate(() => window.CircuitJS1TS.getVisualRegressionLayout().viewport.scale), fullscreenZoom, "fullscreen entry preserves zoom during synchronous event dispatch");
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(resolve)));
+  const fullscreenRefit = await page.evaluate(() => window.CircuitJS1TS.getVisualRegressionLayout().viewport.scale);
+  assert.ok(fullscreenRefit < fullscreenZoom, `fullscreen success refits on next frame (${fullscreenZoom} -> ${fullscreenRefit})`);
+  await fullscreenCanvas.focus();
+  await page.keyboard.press("+");
+  const exitZoom = await page.evaluate(() => window.CircuitJS1TS.getVisualRegressionLayout().viewport.scale);
+  await page.evaluate(() => document.exitFullscreen());
+  assert.equal(await page.evaluate(() => document.fullscreenElement), null, "fullscreen shim exited");
+  approximately(await page.evaluate(() => window.CircuitJS1TS.getVisualRegressionLayout().viewport.scale), exitZoom, "fullscreen exit preserves zoom during synchronous event dispatch");
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(resolve)));
+  const exitRefit = await page.evaluate(() => window.CircuitJS1TS.getVisualRegressionLayout().viewport.scale);
+  assert.ok(exitRefit < exitZoom, `fullscreen exit refits on next frame (${exitZoom} -> ${exitRefit})`);
+  // Unlike resize/fullscreen, hiding the toolbar is a display preference.
+  // Legacy does not silently overwrite the current camera for that action.
+  await fullscreenCanvas.focus();
+  await page.keyboard.press("+");
+  const toolbarZoom = await page.evaluate(() => window.CircuitJS1TS.getVisualRegressionLayout().viewport.scale);
+  await openMenuAction(4, "toggle-toolbar");
+  approximately(await page.evaluate(() => window.CircuitJS1TS.getVisualRegressionLayout().viewport.scale), toolbarZoom, "toolbar hide preserves camera scale");
+  await openMenuAction(4, "toggle-toolbar");
   await page.evaluate((source) => window.CircuitJS1TS.loadCircuit(source), baselineCircuit);
   await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 
