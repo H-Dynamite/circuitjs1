@@ -34,9 +34,10 @@ export interface ScopeXYSegment {
   time: number;
 }
 
-export interface ScopeXYFrame {
-  segments: readonly ScopeXYSegment[];
-  cursor: { x: number; y: number } | null;
+export interface ScopeXYRecord {
+  segment: ScopeXYSegment | null;
+  xIndex: number;
+  yIndex: number;
   scaleX: number;
   scaleY: number;
   clearGeneration: number;
@@ -47,7 +48,6 @@ export class ScopeXYTrajectory {
   private width = 0;
   private height = 0;
   private cursor: { x: number; y: number } | null = null;
-  private segments: ScopeXYSegment[] = [];
   private scaleX = 5;
   private scaleY = 0.1;
   private scaleBrightness = 5;
@@ -55,6 +55,14 @@ export class ScopeXYTrajectory {
   private scaleGreen = 5;
   private scaleBlue = 5;
   private clearGeneration = 0;
+
+  public get generation(): number {
+    return this.clearGeneration;
+  }
+
+  public get currentCursor(): { x: number; y: number } | null {
+    return this.cursor === null ? null : { ...this.cursor };
+  }
 
   /** Resize has legacy allocImage semantics: a backing image resize clears it. */
   public resize(width: number, height: number): void {
@@ -67,7 +75,6 @@ export class ScopeXYTrajectory {
   }
 
   public clear(): void {
-    this.segments = [];
     this.cursor = null;
     this.clearGeneration += 1;
   }
@@ -90,10 +97,12 @@ export class ScopeXYTrajectory {
     channels: readonly ScopeXYChannel[],
     settings: ScopeXYSettings,
     time: number
-  ): void {
-    if (this.width <= 0 || this.height <= 0 || channels.length === 0) return;
-    const xChannel = this.channelAt(channels, settings.x, 0);
-    const yChannel = this.channelAt(channels, settings.y, Math.min(1, channels.length - 1));
+  ): ScopeXYRecord | null {
+    if (this.width <= 0 || this.height <= 0 || channels.length === 0) return null;
+    const xIndex = this.channelIndex(channels.length, settings.x, 0);
+    const yIndex = this.channelIndex(channels.length, settings.y, Math.min(1, channels.length - 1));
+    const xChannel = channels[xIndex] as ScopeXYChannel;
+    const yChannel = channels[yIndex] as ScopeXYChannel;
     const xValue = this.finiteValue(xChannel.read());
     const yValue = this.finiteValue(yChannel.read());
     let scaled = false;
@@ -119,8 +128,9 @@ export class ScopeXYTrajectory {
     // ScopePlot2d's first point establishes draw_ox/draw_oy and emits no
     // segment.  This is observable on a one-tick simulation and important
     // after reset/resize/autoscale clears.
+    let segment: ScopeXYSegment | null = null;
     if (this.cursor !== null) {
-      this.segments.push({
+      segment = {
         fromX: this.cursor.x,
         fromY: this.cursor.y,
         toX: point.x,
@@ -128,46 +138,27 @@ export class ScopeXYTrajectory {
         color,
         alpha,
         time
-      });
-      // The legacy backing canvas fades rather than growing a data array.
-      // Keep enough real history to reproduce a dense fixed-step capture
-      // while imposing an equivalent long-running memory ceiling.
-      if (this.segments.length > 8192) this.segments.splice(0, this.segments.length - 8192);
+      };
     }
     this.cursor = point;
-  }
-
-  public frame(time: number, maxTimeStep: number): ScopeXYFrame {
-    const persistence = Math.max(0, this.currentTrailPersistence);
-    const segments = persistence <= 0
-      ? this.segments
-      : this.segments.map((segment) => ({
-        ...segment,
-        alpha: segment.alpha * Math.exp(
-          -Math.max(0, time - segment.time) /
-          Math.max(Number.EPSILON, persistence * maxTimeStep)
-        )
-      })).filter((segment) => segment.alpha >= 1 / 255);
     return {
-      segments,
-      cursor: this.cursor === null ? null : { ...this.cursor },
+      segment,
+      xIndex,
+      yIndex,
       scaleX: this.scaleX,
       scaleY: this.scaleY,
       clearGeneration: this.clearGeneration
     };
   }
 
-  private currentTrailPersistence = 0;
-
-  private channelAt(
-    channels: readonly ScopeXYChannel[],
+  private channelIndex(
+    channelCount: number,
     index: number,
     fallback: number
-  ): ScopeXYChannel {
-    const normalized = Number.isInteger(index) && index >= 0 && index < channels.length
+  ): number {
+    return Number.isInteger(index) && index >= 0 && index < channelCount
       ? index
-      : Math.min(fallback, channels.length - 1);
-    return channels[normalized] as ScopeXYChannel;
+      : Math.min(fallback, channelCount - 1);
   }
 
   private finiteValue(read: number): number {
@@ -215,7 +206,6 @@ export class ScopeXYTrajectory {
     channels: readonly ScopeXYChannel[],
     settings: ScopeXYSettings
   ): number {
-    this.currentTrailPersistence = settings.trailPersistence;
     if (settings.brightness < 0 || settings.brightness >= channels.length) return 1;
     const value = Math.abs(this.finiteValue((channels[settings.brightness] as ScopeXYChannel).read()));
     while (value > this.scaleBrightness) this.scaleBrightness *= 2;
@@ -223,4 +213,129 @@ export class ScopeXYTrajectory {
   }
 }
 
+/**
+ * Browser-side equivalent of ScopePlot2d.imageCanvas.  Simulation records
+ * each segment once into this private surface; presenting it is O(1) per
+ * frame and the legacy fade is composited onto the same surface.
+ */
+export class ScopeXYRaster {
+  private canvas: HTMLCanvasElement | null = null;
+  private context: CanvasRenderingContext2D | null = null;
+  private width = 0;
+  private height = 0;
+  private clearGeneration = -1;
+  private readonly fadeClock = new ScopeXYFadeClock();
 
+  public sync(
+    width: number,
+    height: number,
+    clearGeneration: number,
+    whiteBackground: boolean
+  ): void {
+    const nextWidth = Math.max(1, Math.floor(width));
+    const nextHeight = Math.max(1, Math.floor(height));
+    if (this.canvas === null) {
+      this.canvas = document.createElement("canvas");
+      this.context = this.canvas.getContext("2d");
+    }
+    if (this.context === null || this.canvas === null) return;
+    if (nextWidth !== this.width || nextHeight !== this.height) {
+      this.width = nextWidth;
+      this.height = nextHeight;
+      this.canvas.width = nextWidth;
+      this.canvas.height = nextHeight;
+      this.clearGeneration = clearGeneration;
+      this.clear(whiteBackground);
+      return;
+    }
+    if (this.clearGeneration !== clearGeneration) {
+      this.clearGeneration = clearGeneration;
+      this.clear(whiteBackground);
+    }
+  }
+
+  public draw(segment: ScopeXYSegment, whiteBackground: boolean): void {
+    if (this.context === null) return;
+    this.context.save();
+    this.context.globalAlpha = segment.alpha;
+    this.context.strokeStyle = whiteBackground && segment.color === "#ffffff"
+      ? "#000000"
+      : segment.color;
+    this.context.beginPath();
+    this.context.moveTo(segment.fromX, segment.fromY);
+    this.context.lineTo(segment.toX, segment.toY);
+    this.context.stroke();
+    this.context.restore();
+  }
+
+  public drawTo(
+    destination: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+    settings: Pick<ScopeXYSettings, "trailPersistence">,
+    simulationTime: number,
+    maxTimeStep: number,
+    whiteBackground: boolean
+  ): void {
+    if (this.canvas === null || this.context === null) return;
+    const fadeAlpha = this.fadeClock.tick(
+      settings.trailPersistence,
+      simulationTime,
+      maxTimeStep
+    );
+    if (fadeAlpha > 0) {
+      this.context.save();
+      this.context.globalAlpha = fadeAlpha;
+      this.context.fillStyle = whiteBackground ? "#ffffff" : "#000000";
+      this.context.fillRect(0, 0, this.width, this.height);
+      this.context.restore();
+    }
+    destination.drawImage(this.canvas, x, y);
+  }
+
+  private clear(whiteBackground: boolean): void {
+    if (this.context === null) return;
+    this.context.save();
+    this.context.globalAlpha = 1;
+    // ScopePlot2d.clearView has the printable #eee backing fill; the normal
+    // dark UI uses #111, then fades toward black while running.
+    this.context.fillStyle = whiteBackground ? "#eeeeee" : "#111111";
+    this.context.fillRect(0, 0, this.width, this.height);
+    this.context.restore();
+    this.fadeClock.reset();
+  }
+
+}
+
+/** Exact ScopePlot2d draw-frame cadence and simulation-time fade contract. */
+export class ScopeXYFadeClock {
+  private alphaCounter = 0;
+  private lastTrailSimTime = -1;
+
+  public reset(): void {
+    this.alphaCounter = 0;
+    this.lastTrailSimTime = -1;
+  }
+
+  public tick(
+    persistence: number,
+    simulationTime: number,
+    maxTimeStep: number
+  ): number {
+    this.alphaCounter += 1;
+    if (this.alphaCounter <= 2) return 0;
+    this.alphaCounter = 0;
+    if (persistence <= 0) return 0.01;
+    if (this.lastTrailSimTime < 0 || simulationTime < this.lastTrailSimTime) {
+      this.lastTrailSimTime = simulationTime;
+    }
+    const elapsed = simulationTime - this.lastTrailSimTime;
+    const timeConstant = persistence * maxTimeStep;
+    const alpha = 1 - Math.exp(-elapsed / Math.max(Number.EPSILON, timeConstant));
+    if (alpha >= 3 / 255) {
+      this.lastTrailSimTime = simulationTime;
+      return alpha;
+    }
+    return 0;
+  }
+}

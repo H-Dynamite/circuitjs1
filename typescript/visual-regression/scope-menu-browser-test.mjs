@@ -190,6 +190,21 @@ try {
   assert.ok(xyCanvas !== null && xyCanvas.changed > 500,
     "2048 deterministic solver samples change the Canvas by a continuous XY trail, not just status text");
 
+  // ScopePlot2d writes automatic X/Y scale back into its plots before XML
+  // export.  Start from a deliberately stale persisted scale to prove this is
+  // a state mutation, not merely a renderer-local scale.
+  const autoScaleSource = xySource
+    .replace('f="x2000d3"', 'f="x2000c3"')
+    .replace('v="0" sc="6.4"', 'v="0" sc="0.5"');
+  await page.evaluate((text) => window.CircuitJS1TS.loadCircuit(text), autoScaleSource);
+  await xyCanvasAfterFixedSteps(page);
+  const autoScale = await page.evaluate(() => {
+    const xml = new DOMParser().parseFromString(window.CircuitJS1TS.exportCircuit(), "application/xml");
+    return xml.querySelector("o > p")?.getAttribute("sc") ?? null;
+  });
+  assert.notEqual(autoScale, "0.5",
+    "automatic XY scale updates the serializable X/Y plot scale");
+
   for (const [fixture, expected] of [
     ["plot2d-color.txt", ["6", "4", "10", "8"]],
     ["plot2d-smile.txt", ["4", "6", "8", "10"]]
@@ -249,6 +264,23 @@ try {
     "combine → separate restores independent Text scope state");
   await page.evaluate((text) => window.CircuitJS1TS.loadCircuit(text), advancedTextExport);
   assert.equal((await state()).scopeCount, 2, "advanced Text scopes reload after combine/separate");
+
+  // Legacy Text has only global V/A scope-scale fields.  An auto XY update
+  // must patch the raw-text fast path too, otherwise export/reload silently
+  // restores the stale input scale even though the live renderer changed it.
+  const autoScaleText = '$ 1 0.000005 10.2 50 5 43 5e-11\n' +
+    'r 0 0 64 0 0 10\nr 96 0 160 0 0 20\n' +
+    'o 0 64 0 4288 0.5 0.1 0 2 1 0';
+  await page.evaluate((text) => {
+    window.CircuitJS1TS.loadCircuit(text);
+    window.CircuitJS1TS.setVisualRegressionSchedulerHold(true);
+    window.CircuitJS1TS.stepSimulation(8);
+  }, autoScaleText);
+  const autoScaleTextExport = await page.evaluate(() => window.CircuitJS1TS.exportCircuit());
+  assert.match(autoScaleTextExport, /^o 0 64 0 4288 0\.1 0\.1 0 2 1 0$/m,
+    "Text XY auto-scale writes the current X/Y scale through its raw-text export path");
+  await page.evaluate((text) => window.CircuitJS1TS.loadCircuit(text), autoScaleTextExport);
+  assert.equal((await state()).scopeCount, 1, "Text XY auto-scale export reloads its persisted scope");
 
   await page.setViewportSize({ width: 700, height: 900 });
   await page.evaluate((text) => window.CircuitJS1TS.loadCircuit(text), source);

@@ -63,7 +63,7 @@ import {
   type DrawMenuItem
 } from "./DrawMenu";
 import { ScopeSampler, type ScopeSampleBucket } from "./ScopeSampling";
-import { ScopeXYTrajectory, type ScopeXYChannel, type ScopeXYSettings } from "./ScopeXY";
+import { ScopeXYRaster, ScopeXYTrajectory, type ScopeXYChannel, type ScopeXYSettings } from "./ScopeXY";
 
 const DEFAULT_CIRCUIT = [
   "$ 1 0.000005 10.20027730826997 50 5 43 5e-11",
@@ -333,6 +333,8 @@ interface ScopeGroup {
   state: CircuitScopeState;
   /** Separate continuous XY runtime; never falls back through 1D buckets. */
   xyTrajectory: ScopeXYTrajectory;
+  /** Persistent ScopePlot2d backing canvas, composited in O(1) per frame. */
+  xyRaster: ScopeXYRaster;
   /** Original plot ownership; lets an untouched/position-only scope round-trip losslessly. */
   sourcePlotKey: string;
 }
@@ -2071,6 +2073,7 @@ export class NativeCircuitApp {
       plots: [plot],
       state,
       xyTrajectory: new ScopeXYTrajectory(),
+      xyRaster: new ScopeXYRaster(),
       sourcePlotKey: ""
     });
     this.syncScopePlots();
@@ -2375,6 +2378,7 @@ export class NativeCircuitApp {
           plots,
           state: plots[0]?.sourceScopeState ?? this.newScopeState(position),
           xyTrajectory: new ScopeXYTrajectory(),
+          xyRaster: new ScopeXYRaster(),
           sourcePlotKey: this.scopePlotKey(plots)
         })
       );
@@ -2397,6 +2401,7 @@ export class NativeCircuitApp {
           plots: [plot],
           state: { ...plot.sourceScopeState, rawText: undefined, rawXml: undefined },
           xyTrajectory: new ScopeXYTrajectory(),
+          xyRaster: new ScopeXYRaster(),
           sourcePlotKey: ""
         });
       }
@@ -4329,6 +4334,7 @@ export class NativeCircuitApp {
           plots: channels,
           state,
           xyTrajectory: new ScopeXYTrajectory(),
+          xyRaster: new ScopeXYRaster(),
           sourcePlotKey: this.scopePlotKey(channels)
         };
       });
@@ -4440,8 +4446,9 @@ export class NativeCircuitApp {
       Math.max(1, this.scopeCanvas.clientHeight)
     );
     for (const group of this.scopeGroups) {
-      const width = layout.rects.find((rect) => rect.scopeId === group.scopeId)
-        ?.width ?? 1;
+      const rect = layout.rects.find((item) => item.scopeId === group.scopeId);
+      const width = rect?.width ?? 1;
+      const height = Math.max(1, rect?.height ?? 1);
       let capacity = 1;
       while (capacity <= Math.max(1, Math.ceil(width))) capacity *= 2;
       for (const channel of group.plots) {
@@ -4457,18 +4464,29 @@ export class NativeCircuitApp {
         );
       }
       if (group.state.plot2d.enabled) {
-        group.xyTrajectory.resize(width, Math.max(1, layout.rects.find(
-          (rect) => rect.scopeId === group.scopeId
-        )?.height ?? 1));
-        group.xyTrajectory.record(
-          group.plots.map((channel): ScopeXYChannel => ({
+        group.xyTrajectory.resize(width, height);
+        const channels = group.plots.map((channel): ScopeXYChannel => ({
             read: channel.read,
             manualScale: this.scopeManualPlot(group, channel)?.manualScale ?? null,
             manualPosition: this.scopeManualPlot(group, channel)?.manualPosition ?? null
-          })),
+        }));
+        const record = group.xyTrajectory.record(
+          channels,
           this.scopeXYSettings(group),
           this.runner.simulation.t
         );
+        group.xyRaster.sync(
+          width,
+          height,
+          record?.clearGeneration ?? 0,
+          this.renderer.whiteBackground
+        );
+        if (record?.segment !== null && record?.segment !== undefined) {
+          group.xyRaster.draw(record.segment, this.renderer.whiteBackground);
+        }
+        if (record !== null && (group.state.flags & 16) === 0) {
+          this.syncXYAutoScale(group, record.xIndex, record.scaleX, record.yIndex, record.scaleY);
+        }
       }
     }
   }
@@ -4502,6 +4520,59 @@ export class NativeCircuitApp {
       manual: (state.flags & 16) !== 0,
       manualDivisions: state.manualDivisions
     };
+  }
+
+  /** ScopePlot2d auto-scale writes X/Y scales back to ScopePlot for export. */
+  private syncXYAutoScale(
+    group: ScopeGroup,
+    xIndex: number,
+    scaleX: number,
+    yIndex: number,
+    scaleY: number
+  ): void {
+    const update = (index: number, scale: number) => {
+      const channel = group.plots[index];
+      if (channel === undefined || channel.scale === scale) return;
+      channel.scale = scale;
+      const statePlot = this.scopeManualPlot(group, channel);
+      if (statePlot !== undefined) statePlot.scale = scale;
+      this.patchRawXmlScopeScale(group, channel, scale);
+      this.patchRawTextScopeScale(group, channel, scale);
+    };
+    update(xIndex, scaleX);
+    update(yIndex, scaleY);
+  }
+
+  /** Patch only `sc` in the preserved XML so all advanced Scope fields survive. */
+  private patchRawXmlScopeScale(
+    group: ScopeGroup,
+    channel: ScopeChannel,
+    scale: number
+  ): void {
+    const raw = group.state.rawXml;
+    if (raw === undefined) return;
+    const children = raw.children.map((child, index) => {
+      if (child.tagName !== "p") return child;
+      const elementIndex = Number.parseInt(child.attributes.e ?? (index === 0 ? String(channel.elementIndex) : "-1"), 10);
+      const value = Number.parseInt(child.attributes.v ?? (index === 0 ? String(channel.value) : "-1"), 10);
+      if (elementIndex !== channel.elementIndex || value !== channel.value) return child;
+      return { ...child, attributes: { ...child.attributes, sc: String(scale) } };
+    });
+    group.state.rawXml = { ...raw, children };
+  }
+
+  /** Old text scopes store one global voltage and current scale at fields 5/6. */
+  private patchRawTextScopeScale(
+    group: ScopeGroup,
+    channel: ScopeChannel,
+    scale: number
+  ): void {
+    if (group.state.rawText === undefined) return;
+    const fields = group.state.rawText.trim().split(/\s+/);
+    const field = channel.value === 3 ? 6 : 5;
+    if (fields.length <= field) return;
+    fields[field] = String(scale);
+    group.state.rawText = fields.join(" ");
   }
 
   /** Pure counterpart of ScopeManager.setupScopes, shared by rendering/tests. */
@@ -4794,24 +4865,25 @@ export class NativeCircuitApp {
     context.clip();
     const settings = this.scopeXYSettings(group);
     group.xyTrajectory.resize(width, height);
-    const frame = group.xyTrajectory.frame(
-      this.runner.simulation.t,
-      this.runner.simulation.maxTimeStep
+    group.xyRaster.sync(
+      width,
+      height,
+      group.xyTrajectory.generation,
+      this.renderer.whiteBackground
     );
-    for (const segment of frame.segments) {
-      context.globalAlpha = segment.alpha;
-      context.strokeStyle = this.renderer.whiteBackground && segment.color === "#ffffff"
-        ? "#000000"
-        : segment.color;
-      context.beginPath();
-      context.moveTo(x + segment.fromX, y + segment.fromY);
-      context.lineTo(x + segment.toX, y + segment.toY);
-      context.stroke();
-    }
-    context.globalAlpha = 1;
-    if (frame.cursor !== null) {
+    group.xyRaster.drawTo(
+      context,
+      x,
+      y,
+      settings,
+      this.runner.simulation.t,
+      this.runner.simulation.maxTimeStep,
+      this.renderer.whiteBackground
+    );
+    const cursor = group.xyTrajectory.currentCursor;
+    if (cursor !== null) {
       context.fillStyle = this.renderer.whiteBackground ? "#000000" : "#ffffff";
-      context.fillRect(x + frame.cursor.x - 2, y + frame.cursor.y - 2, 5, 5);
+      context.fillRect(x + cursor.x - 2, y + cursor.y - 2, 5, 5);
     }
     // Legacy 2D plots always have a horizontal reference line.  The vertical
     // line is yellow for the non-XY timing mode and green for XY mode.
