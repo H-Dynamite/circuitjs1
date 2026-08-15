@@ -150,19 +150,11 @@ try {
     sourceBeforeReadOnlyAction,
     "read-only Edit action leaves circuit unchanged"
   );
-  assert.match(
-    await page.locator("#native-status").textContent(),
-    /Editing disabled/u,
-    "read-only Edit action reports visible feedback"
-  );
+  assert.equal(await page.locator("#native-status").count(), 0, "read-only Edit feedback uses the legacy canvas status area");
   await open(draw);
   assert.equal(await draw.getAttribute("open"), "", "Disable Editing keeps Draw menu operable");
   await draw.locator('[data-tool="wire"]').first().click();
-  assert.match(
-    await page.locator("#native-status").textContent(),
-    /Editing disabled/u,
-    "read-only Draw action reports visible feedback"
-  );
+  assert.equal(await page.locator("#native-status").count(), 0, "read-only Draw feedback uses the legacy canvas status area");
 
   console.log("Edit menu browser state matrix and Center Circuit action passed.");
 } finally {

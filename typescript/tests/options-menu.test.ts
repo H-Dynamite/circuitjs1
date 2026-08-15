@@ -631,9 +631,14 @@ describe("options menu functionality", () => {
     ).toBeNull();
     expect(action("select-all").disabled).toBe(false);
     action("select-all").click();
-    expect(root!.querySelector("#native-status")?.textContent).toContain(
-      "Editing disabled"
-    );
+    expect(root!.querySelector("#native-status")).toBeNull();
+    expect(
+      (app as unknown as { errorMessage: string | null }).errorMessage
+    ).toContain("Editing disabled");
+    action("toggle-disable-editing").click();
+    expect(
+      (app as unknown as { errorMessage: string | null }).errorMessage
+    ).toBeNull();
   });
 
   it("keeps a voltage/current pair together when separating a combined scope", () => {

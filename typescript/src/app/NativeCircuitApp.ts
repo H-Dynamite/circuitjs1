@@ -480,13 +480,14 @@ export interface DynamicCircuitSnapshot {
 }
 
 export class NativeCircuitApp {
+  private static readonly EDITING_DISABLED_MESSAGE =
+    "Editing disabled. Re-enable it from the Options menu.";
   public readonly api: NativeCircuitApi;
 
   private readonly renderer = new CircuitCanvasRenderer();
   private readonly factory = new ElementFactory();
   private readonly canvas: HTMLCanvasElement;
   private readonly scopeCanvas: HTMLCanvasElement;
-  private readonly status: HTMLElement;
   private readonly runButton: HTMLButtonElement;
   private readonly toolButtons: HTMLButtonElement[];
   private readonly fileInput: HTMLInputElement;
@@ -560,7 +561,6 @@ export class NativeCircuitApp {
       "scope-canvas",
       HTMLCanvasElement
     );
-    this.status = this.requireElement("native-status", HTMLElement);
     this.runButton = this.requireElement("run-toggle", HTMLButtonElement);
     this.toolButtons = Array.from(
       this.root.querySelectorAll<HTMLButtonElement>("[data-tool]")
@@ -2229,7 +2229,13 @@ export class NativeCircuitApp {
         break;
       case "toggle-disable-editing":
         this.editDisabled = !this.editDisabled;
-        if (this.editDisabled) this.setTool("select");
+        if (this.editDisabled) {
+          this.setTool("select");
+        } else if (
+          this.errorMessage === NativeCircuitApp.EDITING_DISABLED_MESSAGE
+        ) {
+          this.errorMessage = null;
+        }
         break;
       case "toggle-wheel-edit":
         this.mouseWheelEdit = !this.mouseWheelEdit;
@@ -4396,7 +4402,6 @@ export class NativeCircuitApp {
             break;
           }
         }
-        this.errorMessage = null;
       } catch (error) {
         this.showError(error);
         this.setRunning(false);
@@ -4428,7 +4433,11 @@ export class NativeCircuitApp {
       this.draft,
       this.selectionBox
     );
-    if (this.hasScopes()) {
+    const hasScopes = this.hasScopes();
+    if (!hasScopes) {
+      this.renderLegacyInfo(context, width, height, false);
+    }
+    if (hasScopes) {
       const scopeContext = this.scopeCanvas.getContext("2d");
       if (scopeContext === null) {
         throw new Error("Scope Canvas 2D context is unavailable");
@@ -4441,13 +4450,65 @@ export class NativeCircuitApp {
         0,
         0
       );
-      this.renderScopes(
-        scopeContext,
-        this.scopeCanvas.clientWidth,
-        this.scopeCanvas.clientHeight
-      );
+      const scopeWidth = this.scopeCanvas.clientWidth;
+      const scopeHeight = this.scopeCanvas.clientHeight;
+      if (this.errorMessage === null) {
+        this.renderScopes(scopeContext, scopeWidth, scopeHeight);
+      } else {
+        scopeContext.clearRect(0, 0, scopeWidth, scopeHeight);
+        scopeContext.fillStyle = this.renderer.whiteBackground ? "#eee" : "#111";
+        scopeContext.fillRect(0, 0, scopeWidth, scopeHeight);
+      }
+      this.renderLegacyInfo(scopeContext, scopeWidth, scopeHeight, true);
     }
-    this.updateStatus();
+  }
+
+  private renderLegacyInfo(
+    context: CanvasRenderingContext2D,
+    width: number,
+    height: number,
+    hasScopes: boolean
+  ): void {
+    context.save();
+    const background = this.renderer.whiteBackground ? "#eee" : "#111";
+    const foreground = this.renderer.whiteBackground ? "#111" : "#fff";
+    context.font = "12px Arial";
+    if (this.errorMessage !== null) {
+      const top = Math.max(height - 30, 0);
+      context.fillStyle = background;
+      context.fillRect(0, top, width, height - top);
+      context.fillStyle = foreground;
+      context.fillText(this.errorMessage, 10, Math.max(15, height - 10));
+      context.restore();
+      return;
+    }
+    let x: number;
+    let y: number;
+    if (hasScopes) {
+      const { rects } = this.scopeLayout(width, height);
+      const lastGroup = this.scopeGroups[this.scopeGroups.length - 1];
+      const lastScope = rects.find((rect) => rect.scopeId === lastGroup?.scopeId);
+      x = lastScope === undefined ? 5 : lastScope.x + lastScope.width + 20;
+      y = 0;
+    } else {
+      const left = Math.max(width - 160, 0);
+      y = Math.max(height - 70, 0);
+      context.fillStyle = background;
+      context.fillRect(left, y, width - left, height - y);
+      x = left + 5;
+    }
+    context.fillStyle = foreground;
+    context.fillText(
+      `t = ${CircuitElm.getTimeText(this.runner.simulation.t)}`,
+      x,
+      y + 15
+    );
+    context.fillText(
+      `时间步长 = ${CircuitElm.getTimeText(this.runner.simulation.timeStep)}`,
+      x,
+      y + 30
+    );
+    context.restore();
   }
 
   private recordScope(): void {
@@ -4786,12 +4847,12 @@ export class NativeCircuitApp {
   ): void {
     context.clearRect(0, 0, width, height);
     // ScopeManager's normal backing fill is the dark UI surface (#111).
-    context.fillStyle = this.renderer.whiteBackground ? "#ffffff" : "#111111";
+    context.fillStyle = this.renderer.whiteBackground ? "#eeeeee" : "#111111";
     context.fillRect(0, 0, width, height);
     // ScopeManager.setupScopes reserves CirSim.infoWidth at the right.  With
     // one or two scope columns it grows to 240px; three or more retain 160px.
     // Individual scopes are stacked inside their persisted `position` column.
-    const { columnCount, panelWidth, rects } = this.scopeLayout(width, height);
+    const { rects } = this.scopeLayout(width, height);
     const rectangles = new Map(
       this.scopeGroups.map((group) => [group, rects.find((rect) => rect.scopeId === group.scopeId)])
     );
@@ -4854,11 +4915,6 @@ export class NativeCircuitApp {
       }
       context.restore();
     });
-    context.fillStyle = this.renderer.whiteBackground ? "#111827" : "#f3f4f6";
-    context.font = "12px Arial";
-    const infoX = columnCount * panelWidth + 8;
-    context.fillText(`t = ${CircuitElm.getUnitText(this.runner.simulation.t, "s")}`, infoX, 18);
-    context.fillText(`时间步长 = ${CircuitElm.getUnitText(this.runner.simulation.timeStep, "s")}`, infoX, 34);
   }
 
   /** Render a continuous ScopePlot2d trail without contaminating 1D buckets. */
@@ -5568,13 +5624,6 @@ export class NativeCircuitApp {
     output.textContent = CircuitElm.getShortUnitText(value, unit);
   }
 
-  private updateStatus(): void {
-    const state = this.errorMessage ?? (this.running ? "运行中" : "已暂停");
-    this.status.textContent =
-      `纯 TypeScript · ${state} · 元件 ${this.runner.elements.length} · ` +
-      `t=${CircuitElm.getTimeText(this.runner.simulation.t)}`;
-  }
-
   private resizeCanvases(): void {
     const canvases = this.hasScopes()
       ? [this.canvas, this.scopeCanvas]
@@ -5784,8 +5833,7 @@ export class NativeCircuitApp {
   }
 
   private notifyEditingDisabled(): void {
-    this.errorMessage = "Editing disabled. Re-enable it from the Options menu.";
-    this.updateStatus();
+    this.errorMessage = NativeCircuitApp.EDITING_DISABLED_MESSAGE;
   }
 
   private canvasPosition(event: MouseEvent): { x: number; y: number } {
@@ -6159,7 +6207,6 @@ export class NativeCircuitApp {
             <div class="canvas-column">
               <div class="canvas-wrap">
                 <canvas id="circuit-canvas" aria-label="电路画布"></canvas>
-                <div id="native-status" class="native-status"></div>
               </div>
               <canvas id="scope-canvas" class="scope-canvas" aria-label="示波器"></canvas>
             </div>

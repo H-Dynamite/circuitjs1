@@ -77,7 +77,7 @@ try {
   await open(edit);
   assert.equal(await edit.locator('[data-action="copy"]').isDisabled(), false, "read-only mode keeps a previously valid Edit action available");
   await edit.locator('[data-action="copy"]').click();
-  assert.match(await page.locator("#native-status").textContent(), /Editing disabled/u, "Disable Editing blocks the action but keeps Edit operable");
+  assert.equal(await page.locator("#native-status").count(), 0, "Disable Editing feedback no longer uses a TS-only DOM badge");
 
   await page.reload({ waitUntil: "networkidle" });
   await page.waitForFunction(() => typeof window.CircuitJS1TS?.loadCircuit === "function");

@@ -742,25 +742,11 @@ button {
 }
 
 .scope-canvas {
-  border-top: 1px solid #393939;
-  background: #101010;
+  background: #111111;
 }
 
 .scope-canvas[hidden] {
   display: none;
-}
-
-.native-status {
-  position: absolute;
-  right: 9px;
-  bottom: 8px;
-  padding: 4px 7px;
-  border: 1px solid #374151;
-  border-radius: 3px;
-  color: #d1fae5;
-  background: rgb(5 20 15 / 84%);
-  font: 11px/1.35 Consolas, monospace;
-  pointer-events: none;
 }
 
 .control-panel {
