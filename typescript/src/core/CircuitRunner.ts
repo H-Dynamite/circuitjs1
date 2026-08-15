@@ -149,10 +149,20 @@ export class CircuitRunner {
     CustomCompositeModel.clear();
     CustomCompositeModel.loadInternalModels(factory);
     for (const record of document.records) {
-      if (record.kind === "model" && record.modelType === "!") {
-        CustomLogicModel.undumpModel(
-          new StringTokenizer(record.arguments.join(" "))
-        );
+      if (record.kind !== "model") continue;
+
+      const tokenizer = new StringTokenizer(record.arguments.join(" "));
+      if (record.modelType === "!") {
+        CustomLogicModel.undumpModel(tokenizer);
+      } else if (record.modelType === "32") {
+        // Numeric dump type 32 is a TransistorModel definition, not a
+        // CircuitElm.  It must be available before the following transistor
+        // records resolve their model name (for example, early.txt).
+        TransistorModel.undumpModel(tokenizer);
+      } else if (record.modelType === "34" || record.modelType === '"') {
+        // Numeric dump type 34 and its one-character spelling are diode-model
+        // definitions.  As in CircuitLoader.java, they are state records.
+        DiodeModel.undumpModel(tokenizer);
       }
     }
     const elements = records.map((record) => {

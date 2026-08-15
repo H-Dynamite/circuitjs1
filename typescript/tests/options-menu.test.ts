@@ -5,6 +5,7 @@ import {
   CircuitElm,
   CircuitRunner,
   CustomCompositeElm,
+  TransistorElm,
   VoltageElm
 } from "../src/core";
 
@@ -19,6 +20,30 @@ describe("options menu functionality", () => {
     HTMLDialogElement.prototype.close = function close() {
       this.removeAttribute("open");
     };
+  });
+
+  it("exports text model definitions before their dependent elements", () => {
+    const root = document.querySelector<HTMLElement>("#app");
+    expect(root).not.toBeNull();
+    const app = new NativeCircuitApp(root!);
+    app.api.loadCircuit(readFileSync("src/examples/circuits/early.txt", "utf8"));
+
+    const exported = app.api.exportCircuit();
+    const modelIndex = exported.indexOf("\n32 early ");
+    const firstTransistorIndex = exported.indexOf("\nt ");
+    expect(modelIndex).toBeGreaterThan(0);
+    expect(firstTransistorIndex).toBeGreaterThan(modelIndex);
+
+    const reloadedRoot = document.createElement("div");
+    document.body.append(reloadedRoot);
+    const reloaded = new NativeCircuitApp(reloadedRoot);
+    reloaded.api.loadCircuit(exported);
+    const transistor = reloaded.api.getElements().find(
+      (element): element is TransistorElm =>
+        element instanceof TransistorElm && element.modelName === "early"
+    );
+    expect(transistor?.modelName).toBe("early");
+    expect(transistor?.model?.invEarlyVoltF).toBeCloseTo(0.02);
   });
 
   it("keeps the legacy Options command path, circuit flags, and stored preferences", () => {

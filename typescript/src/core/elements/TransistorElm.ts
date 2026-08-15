@@ -118,6 +118,11 @@ export class TransistorElm extends CircuitElm {
     return "t".charCodeAt(0);
   }
 
+  /** Preserves custom model identity and nonlinear starting state in text circuits. */
+  public override dump(): string {
+    return `${super.dump()} ${this.pnp} ${this.lastvbe} ${this.lastvbc} ${this.beta} ${CustomLogicModel.escape(this.modelName)}`;
+  }
+
   public override nonLinear(): boolean {
     return true;
   }

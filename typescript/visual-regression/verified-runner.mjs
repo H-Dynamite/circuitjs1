@@ -192,7 +192,11 @@ function textElementsIn(source) {
     .split(/\r?\n/)
     .filter((line) => {
       const type = line.trim().split(/\s+/, 1)[0] ?? "";
-      return !["", "$", "o", "h", "!", ".", '"', "&", "%", "?", "B"].includes(type);
+      // These are CircuitLoader records, rather than CircuitElm instances:
+      // 32/34 define transistor/diode models and 38 defines an adjustable UI
+      // control.  Counting them would make a valid native load look as if an
+      // element disappeared (conv-buckboost, early, lrc, etc.).
+      return !["", "$", "o", "h", "!", ".", '"', "32", "34", "38", "&", "%", "?", "B"].includes(type);
     }).length;
 }
 async function expectedElementsIn(page, source) {
@@ -202,11 +206,15 @@ async function expectedElementsIn(page, source) {
     if (document.querySelector("parsererror") !== null) {
       throw new Error("Invalid XML fixture");
     }
-    // CircuitRunner creates one top-level element for every direct <cir>
-    // child with an x position. Nested <ccm> model definitions, <o>/<p>
-    // scope data and text contents are state, not runner elements.
+    // CircuitRunner creates elements only for records which XMLDeserializer
+    // classifies as `element`. A scope can legitimately use an `x` attribute
+    // (cs-integrator.xml does), so position alone is not a valid count.
+    const nonElementTags = new Set([
+      "o", "dm", "rlm", "tm", "clm", "ccm", "h", "adj",
+      "test", "switchevent", "scopedata"
+    ]);
     return [...document.documentElement.children].filter((element) =>
-      element.hasAttribute("x")
+      element.hasAttribute("x") && !nonElementTags.has(element.tagName)
     ).length;
   }, source);
 }
@@ -215,7 +223,13 @@ async function tsLoad(page, baseUrl, source, runningControls = false) {
   await page.waitForFunction(() => typeof window.CircuitJS1TS?.loadCircuit === "function", undefined, { timeout: 20_000 });
   await page.evaluate((input) => window.CircuitJS1TS.loadCircuit(input), source);
   const state = await page.evaluate(() => { window.CircuitJS1TS.setRunning(false); const exported = window.CircuitJS1TS.exportCircuit(); return { elementCount: window.CircuitJS1TS.getElements().length, exportedLength: exported.length, exportedPrefix: exported.slice(0, 160), exportedCircuit: exported }; });
-  const expectedElementCount = await expectedElementsIn(page, source); if (state.elementCount !== expectedElementCount) throw new Error(`TS element count mismatch: expected ${expectedElementCount}, got ${state.elementCount}`);
+  const expectedElementCount = await expectedElementsIn(page, source);
+  // Element-count parity is a product validation failure, not a reason to
+  // discard the real rendered evidence.  Continue to settle and capture the
+  // native page so a failed fixture always has Legacy/TS/diff screenshots.
+  const elementCountError = state.elementCount === expectedElementCount
+    ? undefined
+    : `TS element count mismatch: expected ${expectedElementCount}, got ${state.elementCount}`;
   await stableCanvas(page);
   const { exportedCircuit, ...summary } = state;
   const canvas = await page.locator("canvas").evaluateAll((items) => {
@@ -236,7 +250,7 @@ async function tsLoad(page, baseUrl, source, runningControls = false) {
     return window.CircuitJS1TS.getDynamicSnapshot().running;
   }, runningControls);
   if (runningControls && running !== true) throw new Error(`TypeScript run-controls gate could not enter RUN state: ${running}`);
-  return { inputSha256: sha(source), expectedElementCount, ...summary, exportedSha256: sha(exportedCircuit), paused: !running, running, canvas, visualLayout };
+  return { inputSha256: sha(source), expectedElementCount, elementCountError, ...summary, exportedSha256: sha(exportedCircuit), paused: !running, running, canvas, visualLayout };
 }
 async function popupGeometry(locator, label) {
   const box = await locator.boundingBox();
@@ -262,6 +276,15 @@ export function applyVisualOutcome(result, baselineValid, visualReview) {
   if (result.status === "failed") return;
   if (!baselineValid) result.status = "invalid-baseline";
   else if (visualReview) result.status = "review";
+}
+function applyTsValidation(result) {
+  const error = result.source?.ts?.elementCountError;
+  if (!error) return;
+  result.status = "failed";
+  // The screenshots are valid capture artifacts; the product assertion, not
+  // capture infrastructure, failed.  Keep this distinction in report.json.
+  result.validation = { tsElementCount: error };
+  result.error = [result.error, error].filter(Boolean).join("\n");
 }
 async function verifyMenu(page, app, entry, index) {
   const [id, legacyText, tsText, key] = entry;
@@ -383,14 +406,15 @@ export async function run() {
           }
           await shot(menuTsPage,files.ts);
           result.baseline=comparableLayout(result.source.legacy.visualLayout,result.source.ts.visualLayout);
-          if(!result.baseline.valid){applyVisualOutcome(result, false, false)}
-          else if(options.diff){result.metrics=await diff(context,files.legacy,files.ts,files.diff);result.regionMetrics=await diffRegions(context,files,result.source.legacy.visualLayout,result.source.ts.visualLayout);applyVisualOutcome(result, true, result.metrics.diffPixelRatio>REVIEW_DIFF_PIXEL_RATIO||result.metrics.mae>REVIEW_MAE)}
+          if(options.diff){result.metrics=await diff(context,files.legacy,files.ts,files.diff);result.regionMetrics=await diffRegions(context,files,result.source.legacy.visualLayout,result.source.ts.visualLayout)}
+          applyTsValidation(result);
+          applyVisualOutcome(result, result.baseline.valid, Boolean(result.metrics&&(result.metrics.diffPixelRatio>REVIEW_DIFF_PIXEL_RATIO||result.metrics.mae>REVIEW_MAE)));
         });
       } catch(error) { result.status="failed";result.captureStatus="failed";result.error=errorText(error) }
       finally { addMonitorFailures(result,[menuLegacyWatch,menuTsWatch]); await menuLegacyPage.close().catch(() => {}); await menuTsPage.close().catch(() => {}); }
       await writeFile(join(options.output,"metadata",`${nameFor(id)}.json`),JSON.stringify(result,null,2));results.push(result);console.log(`[${result.status}] menu ${entry[0]}`);
     }
-    for(const scenario of selected){const files=filesFor(options.output,nameFor(scenario.id)),old=options.keepOutput&&await previous(options.output,scenario.id,files);if(old){applyMenuStripGate(old,options.menuStripGate);applyRunControlsGate(old,options.runControlsGate);results.push(old);console.log(`[resumed] ${scenario.id}`);continue}const source=await readFile(scenario.file,"utf8"),result={id:scenario.id,status:"passed",captureStatus:"passed",files,error:undefined,source:{inputSha256:sha(source)}};legacyWatch.reset();tsWatch.reset();try{result.source.legacy=await legacyLoad(legacyPage,baseUrl,scenario.id,source,options.runControlsGate);await shot(legacyPage,files.legacy);result.source.ts=await tsLoad(tsPage,baseUrl,source,options.runControlsGate);result.runControlsState={legacy:result.source.legacy.running,ts:result.source.ts.running};await shot(tsPage,files.ts);result.baseline=comparableLayout(result.source.legacy.visualLayout,result.source.ts.visualLayout);if(!result.baseline.valid){result.status="invalid-baseline"}else if(options.diff){result.metrics=await diff(context,files.legacy,files.ts,files.diff);result.regionMetrics=await diffRegions(context,files,result.source.legacy.visualLayout,result.source.ts.visualLayout);if(result.metrics.diffPixelRatio>REVIEW_DIFF_PIXEL_RATIO||result.metrics.mae>REVIEW_MAE)result.status="review"}}catch(error){result.status="failed";result.captureStatus="failed";result.error=errorText(error)}addMonitorFailures(result,[legacyWatch,tsWatch]);applyMenuStripGate(result,options.menuStripGate);applyRunControlsGate(result,options.runControlsGate);await writeFile(join(options.output,"metadata",`${nameFor(scenario.id)}.json`),JSON.stringify(result,null,2));results.push(result);console.log(`[${result.status}] ${scenario.id}`)}
+    for(const scenario of selected){const files=filesFor(options.output,nameFor(scenario.id)),old=options.keepOutput&&await previous(options.output,scenario.id,files);if(old){applyMenuStripGate(old,options.menuStripGate);applyRunControlsGate(old,options.runControlsGate);results.push(old);console.log(`[resumed] ${scenario.id}`);continue}const source=await readFile(scenario.file,"utf8"),result={id:scenario.id,status:"passed",captureStatus:"passed",files,error:undefined,source:{inputSha256:sha(source)}};legacyWatch.reset();tsWatch.reset();try{result.source.legacy=await legacyLoad(legacyPage,baseUrl,scenario.id,source,options.runControlsGate);await shot(legacyPage,files.legacy);result.source.ts=await tsLoad(tsPage,baseUrl,source,options.runControlsGate);result.runControlsState={legacy:result.source.legacy.running,ts:result.source.ts.running};await shot(tsPage,files.ts);result.baseline=comparableLayout(result.source.legacy.visualLayout,result.source.ts.visualLayout);if(options.diff){result.metrics=await diff(context,files.legacy,files.ts,files.diff);result.regionMetrics=await diffRegions(context,files,result.source.legacy.visualLayout,result.source.ts.visualLayout)}applyTsValidation(result);applyVisualOutcome(result,result.baseline.valid,Boolean(result.metrics&&(result.metrics.diffPixelRatio>REVIEW_DIFF_PIXEL_RATIO||result.metrics.mae>REVIEW_MAE)))}catch(error){result.status="failed";result.captureStatus="failed";result.error=errorText(error)}addMonitorFailures(result,[legacyWatch,tsWatch]);applyMenuStripGate(result,options.menuStripGate);applyRunControlsGate(result,options.runControlsGate);await writeFile(join(options.output,"metadata",`${nameFor(scenario.id)}.json`),JSON.stringify(result,null,2));results.push(result);console.log(`[${result.status}] ${scenario.id}`)}
   } finally { await context.close();await browser.close();await server.close(); }
   const summary={passed:results.filter((r)=>r.status==="passed").length,review:results.filter((r)=>r.status==="review").length,invalidBaseline:results.filter((r)=>r.status==="invalid-baseline").length,failed:results.filter((r)=>r.status==="failed").length}; const report={generatedAt:new Date().toISOString(),viewport:VIEWPORT,thresholds:{REVIEW_DIFF_PIXEL_RATIO,REVIEW_MAE,MENU_STRIP_MAE:options.menuStripGate?MENU_STRIP_MAE:undefined,RUN_CONTROLS_MAE:options.runControlsGate?RUN_CONTROLS_MAE:undefined},execution:{mode:options.runControlsGate?"run-controls-gate":options.menuStripGate?"menu-strip-gate":options.strict?"strict-gate":"review-collection",strict:options.strict,menuStripGate:options.menuStripGate,runControlsGate:options.runControlsGate,exitNonZeroWhen:options.strict?"review, invalid-baseline, or failed":"invalid-baseline or failed"},source:{totalScenarios:all.length,capturedScenarios:selected.length},summary,results}; await writeFile(join(options.output,"report.json"),JSON.stringify(report,null,2));await writeFile(join(options.output,"report.html"),html(results,options.output));console.log(`Report: ${join(options.output,"report.html")}`);if(summary.failed||summary.invalidBaseline||(options.strict&&summary.review))process.exitCode=1;
 }

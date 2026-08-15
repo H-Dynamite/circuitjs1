@@ -1,6 +1,6 @@
 import { readdir, readFile, stat } from "node:fs/promises";
 import { resolve } from "node:path";
-import { CircuitRunner } from "../src/core";
+import { CircuitRunner, TransistorElm } from "../src/core";
 import { expect, it } from "vitest";
 
 async function findCircuitFiles(directory: string): Promise<string[]> {
@@ -84,4 +84,46 @@ it(
     expect(solveFailures).toEqual([]);
   },
   120_000
+);
+
+it(
+  "keeps metadata records out of the seven element-count fixtures while preserving their simulation state",
+  async () => {
+    const fixtureDirectory = resolve(
+      process.cwd(),
+      "src",
+      "examples",
+      "circuits"
+    );
+    const expectedCounts: Record<string, number> = {
+      "conv-buckboost.txt": 15,
+      "cs-integrator.txt": 10,
+      "early.txt": 14,
+      "itov.txt": 9,
+      "lrc.txt": 7,
+      "transrectifier.txt": 8,
+      "triacdimmer.txt": 9
+    };
+
+    for (const [file, expectedCount] of Object.entries(expectedCounts)) {
+      const source = await readFile(resolve(fixtureDirectory, file), "utf8");
+      const runner = source.trimStart().startsWith("<")
+        ? CircuitRunner.fromXml(source)
+        : CircuitRunner.fromText(source);
+
+      expect(runner.elements, file).toHaveLength(expectedCount);
+      expect(() => runner.analyzeCircuit(), file).not.toThrow();
+      expect(() => runner.runCircuit(), file).not.toThrow();
+    }
+
+    const early = await readFile(resolve(fixtureDirectory, "early.txt"), "utf8");
+    const earlyRunner = CircuitRunner.fromText(early);
+    const transistor = earlyRunner.elements.find(
+      (element): element is TransistorElm =>
+        element instanceof TransistorElm && element.modelName === "early"
+    );
+    expect(transistor?.modelName).toBe("early");
+    expect(transistor?.model?.invEarlyVoltF).toBeCloseTo(0.02);
+  },
+  30_000
 );

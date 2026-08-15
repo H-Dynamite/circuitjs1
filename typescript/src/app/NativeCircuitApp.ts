@@ -3609,7 +3609,16 @@ export class NativeCircuitApp {
     const modelRecords = this.runner.preservedTextRecords.filter(
       (record) => {
         const type = record.trimStart().split(/\s+/, 1)[0];
-        return type === "!" || type === "." || type === '"';
+        // These records configure factories used by later CircuitElm lines.
+        // Preserve their legacy pre-element ordering so a text export can be
+        // loaded into a fresh app without silently falling back to defaults.
+        return (
+          type === "!" ||
+          type === "." ||
+          type === '"' ||
+          type === "32" ||
+          type === "34"
+        );
       }
     );
     const otherRecords = this.runner.preservedTextRecords.filter((record) => {
