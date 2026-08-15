@@ -9,6 +9,7 @@ import { ChipElm, ChipPin } from "./ChipElm";
 
 /** Rule-table digital component ported from CustomLogicElm.java. */
 export class CustomLogicElm extends ChipElm {
+  public static lastModelName = "default";
   public modelName = "default";
   public model = CustomLogicModel.getModelWithName("default");
   public inputCount = 0;
@@ -39,6 +40,8 @@ export class CustomLogicElm extends ChipElm {
     super(x, y, x2, y2, flags, tokens);
     if (tokens.hasMoreTokens()) {
       this.modelName = CustomLogicModel.unescape(tokens.nextToken());
+    } else if (tokenizer === undefined) {
+      this.modelName = CustomLogicElm.lastModelName;
     }
     this.model = CustomLogicModel.getModelWithName(this.modelName);
     this.setupPins();

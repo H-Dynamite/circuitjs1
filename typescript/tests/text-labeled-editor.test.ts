@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NativeCircuitApp } from "../src/app/NativeCircuitApp";
-import { LabeledNodeElm, TextElm } from "../src/core";
+import { CustomLogicElm, GateElm, LabeledNodeElm, TextElm } from "../src/core";
 
 describe("TextElm and LabeledNodeElm visible editors", () => {
   beforeEach(() => {
@@ -18,7 +18,7 @@ describe("TextElm and LabeledNodeElm visible editors", () => {
   const drawAndOpenEditor = (
     root: HTMLElement,
     app: NativeCircuitApp,
-    tool: "text" | "labeled-node"
+    tool: "text" | "labeled-node" | "and-gate" | "custom-logic"
   ) => {
     const canvas = root.querySelector<HTMLCanvasElement>("#circuit-canvas")!;
     Object.defineProperty(canvas, "getBoundingClientRect", {
@@ -103,6 +103,44 @@ describe("TextElm and LabeledNodeElm visible editors", () => {
     expect(element.isInternal()).toBe(true);
     expect(element.isRotateText()).toBe(true);
     expect(root.querySelector('input[data-edit-switch="busWidth"]')).toBeNull();
+    expect(app.api.stepSimulation(1).steps).toBe(1);
+  });
+
+  it("applies every legacy Gate field through the visible editor", () => {
+    const root = document.querySelector<HTMLElement>("#app")!;
+    const app = new NativeCircuitApp(root);
+    app.api.loadCircuit("$ 1 0.000005 10 50 5");
+    drawAndOpenEditor(root, app, "and-gate");
+    root.querySelector<HTMLInputElement>('input[data-edit-switch="gateInputCount"]')!.value = "3";
+    root.querySelector<HTMLInputElement>('input[data-edit-switch="gateHighVoltage"]')!.value = "6.25";
+    root.querySelector<HTMLInputElement>('input[data-edit-switch="gateSchmitt"]')!.checked = true;
+    root.querySelector<HTMLInputElement>('input[data-edit-switch="gateInvertInputs"]')!.checked = true;
+    root.querySelector<HTMLInputElement>('input[data-edit-switch="gatePropagationDelay"]')!.value = "2u";
+    root.querySelector<HTMLButtonElement>('#element-edit-form button[type="submit"]')!.click();
+    const element = app.api.getElements()[0] as GateElm;
+    expect(element.inputCount).toBe(3);
+    expect(element.highVoltage).toBe(6.25);
+    expect(element.hasSchmittInputs()).toBe(true);
+    expect(element.hasFlag(GateElm.FLAG_INVERT_INPUTS)).toBe(true);
+    expect(element.propagationDelay).toBe(2e-6);
+    expect(element.volts).toHaveLength(4);
+    expect(app.api.stepSimulation(1).steps).toBe(1);
+  });
+
+  it("copies CustomLogic to a new model and applies its logic voltage", () => {
+    const root = document.querySelector<HTMLElement>("#app")!;
+    const app = new NativeCircuitApp(root);
+    app.api.loadCircuit(["$ 1 0.000005 10 50 5", "! default 0 A Q default 0\\q1\\n1\\q0"].join("\n"));
+    drawAndOpenEditor(root, app, "custom-logic");
+    root.querySelector<HTMLInputElement>('input[data-edit-switch="customLogicHighVoltage"]')!.value = "6";
+    root.querySelector<HTMLInputElement>('input[data-edit-switch="customLogicModelName"]')!.value = "alt-copy";
+    root.querySelector<HTMLButtonElement>('#element-edit-form button[type="submit"]')!.click();
+    const element = app.api.getElements()[0] as CustomLogicElm;
+    expect(element.modelName).toBe("alt-copy");
+    expect(element.highVoltage).toBe(6);
+    expect(element.model.inputs).toEqual(["A"]);
+    expect(element.model.outputs).toEqual(["Q"]);
+    expect(element.model.rules).toBe("0=1\n1=0");
     expect(app.api.stepSimulation(1).steps).toBe(1);
   });
 });

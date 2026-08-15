@@ -12,6 +12,7 @@ export abstract class GateElm extends CircuitElm {
   public static readonly FLAG_SCHMITT = 2;
   public static readonly FLAG_INVERT_INPUTS = 4;
   public static lastHighVoltage = 5;
+  public static lastSchmitt = false;
 
   public inputCount = 2;
   public lastOutput = false;
@@ -70,6 +71,9 @@ export abstract class GateElm extends CircuitElm {
       }
     } else if (tokenizer === undefined) {
       this.highVoltage = GateElm.lastHighVoltage;
+      if (GateElm.lastSchmitt) {
+        this.flags |= GateElm.FLAG_SCHMITT;
+      }
     }
     if (tokenizer?.hasMoreTokens()) {
       const propagationDelay = Number(tokenizer.nextToken());

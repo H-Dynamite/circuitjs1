@@ -7,6 +7,8 @@ import {
   CircuitLoader,
   CircuitRunner,
   CurrentElm,
+  CustomLogicElm,
+  CustomLogicModel,
   CustomCompositeModel,
   CustomTransformerElm,
   DataInputElm,
@@ -18,6 +20,7 @@ import {
   InductorElm,
   LampElm,
   FuseElm,
+  GateElm,
   LDRElm,
   LabeledNodeElm,
   LogicInputElm,
@@ -1775,7 +1778,9 @@ export class NativeCircuitApp {
     if (
       element instanceof SwitchElm ||
       element instanceof TextElm ||
-      element instanceof LabeledNodeElm
+      element instanceof LabeledNodeElm ||
+      element instanceof GateElm ||
+      element instanceof CustomLogicElm
     ) return true;
     return (
       this.root.querySelector("#element-properties .property-row") !== null
@@ -1815,6 +1820,7 @@ export class NativeCircuitApp {
         max?: number;
         multiline?: boolean;
         required?: boolean;
+        numeric?: boolean;
       } = {}
     ) => {
       const label = document.createElement("label");
@@ -1827,7 +1833,7 @@ export class NativeCircuitApp {
         ? document.createElement("textarea")
         : document.createElement("input");
       if (input instanceof HTMLInputElement) {
-        input.type = options.integer ? "number" : "text";
+        input.type = options.integer || options.numeric ? "number" : "text";
       } else {
         input.rows = 5;
       }
@@ -1836,6 +1842,7 @@ export class NativeCircuitApp {
       input.dataset[dataName] = dataValue;
       if (input instanceof HTMLInputElement) {
         if (options.integer) input.step = "1";
+        else if (options.numeric) input.step = "any";
         if (options.min !== undefined) input.min = String(options.min);
         if (options.max !== undefined) input.max = String(options.max);
       }
@@ -1914,6 +1921,21 @@ export class NativeCircuitApp {
       });
       addCheckbox("内部节点", element.isInternal(), "internal");
       addCheckbox("旋转文字", element.isRotateText(), "rotateText");
+    } else if (element instanceof GateElm) {
+      addTextField("输入数量", String(element.inputCount), "editSwitch", "gateInputCount", "", {
+        integer: true, min: 1, max: 8
+      });
+      addTextField("高电平电压", String(element.highVoltage), "editSwitch", "gateHighVoltage", "", {
+        numeric: true, min: 1, max: 10
+      });
+      addCheckbox("施密特输入", element.hasSchmittInputs(), "gateSchmitt");
+      addCheckbox("反相输入", element.hasFlag(GateElm.FLAG_INVERT_INPUTS), "gateInvertInputs");
+      addTextField("传播延迟", String(element.propagationDelay), "editSwitch", "gatePropagationDelay", "s");
+    } else if (element instanceof CustomLogicElm) {
+      addTextField("高电平电压", String(element.highVoltage), "editSwitch", "customLogicHighVoltage");
+      addTextField("模型名称", element.modelName, "editSwitch", "customLogicModelName", "", {
+        required: false
+      });
     } else {
       const sourceRows = this.root.querySelectorAll<HTMLElement>(
         "#element-properties .property-row"
@@ -2057,6 +2079,48 @@ export class NativeCircuitApp {
       } else {
         element.flags &= ~LabeledNodeElm.FLAG_ROTATE_TEXT;
       }
+      element.setPoints();
+    } else if (element instanceof GateElm) {
+      const countInput = getSwitchInput("gateInputCount");
+      const highInput = getSwitchInput("gateHighVoltage");
+      const delayInput = getSwitchInput("gatePropagationDelay");
+      const count = countInput === null ? null : parseEditableNumber(countInput.value);
+      const highVoltage = highInput === null ? null : parseEditableNumber(highInput.value);
+      const propagationDelay = delayInput === null ? null : parseEditableNumber(delayInput.value);
+      if (
+        countInput === null || !countInput.checkValidity() ||
+        highInput === null || !highInput.checkValidity() ||
+        count === null || highVoltage === null || propagationDelay === null
+      ) {
+        error.textContent = "门电路参数格式无效。";
+        return;
+      }
+      element.inputCount = Math.trunc(count);
+      element.highVoltage = highVoltage;
+      GateElm.lastHighVoltage = highVoltage;
+      element.propagationDelay = propagationDelay;
+      if (getSwitchInput("gateSchmitt")?.checked) element.flags |= GateElm.FLAG_SCHMITT;
+      else element.flags &= ~GateElm.FLAG_SCHMITT;
+      GateElm.lastSchmitt = element.hasSchmittInputs();
+      if (getSwitchInput("gateInvertInputs")?.checked) element.flags |= GateElm.FLAG_INVERT_INPUTS;
+      else element.flags &= ~GateElm.FLAG_INVERT_INPUTS;
+      element.allocNodes();
+      element.setupVolts();
+      element.setPoints();
+    } else if (element instanceof CustomLogicElm) {
+      const highInput = getSwitchInput("customLogicHighVoltage");
+      const nameInput = getSwitchInput("customLogicModelName");
+      const highVoltage = highInput === null ? null : parseEditableNumber(highInput.value);
+      const modelName = nameInput?.value ?? "";
+      if (highVoltage === null || modelName.length === 0) {
+        error.textContent = "自定义逻辑参数格式无效。";
+        return;
+      }
+      element.highVoltage = highVoltage;
+      element.modelName = modelName;
+      CustomLogicElm.lastModelName = modelName;
+      element.model = CustomLogicModel.getModelWithNameOrCopy(modelName, element.model);
+      element.setupPins();
       element.setPoints();
     }
 
@@ -3668,6 +3732,15 @@ export class NativeCircuitApp {
       this.showError(new Error(`元件 ${selected.label} 尚未迁移`));
       return;
     }
+    if (element instanceof GateElm) {
+      element.highVoltage = GateElm.lastHighVoltage;
+      if (GateElm.lastSchmitt) element.flags |= GateElm.FLAG_SCHMITT;
+      else element.flags &= ~GateElm.FLAG_SCHMITT;
+    } else if (element instanceof CustomLogicElm) {
+      element.modelName = CustomLogicElm.lastModelName;
+      element.model = CustomLogicModel.getModelWithName(element.modelName);
+      element.setupPins();
+    }
     element.setPoints();
     if (selected.xmlOnly) this.runner.sourceFormat = "xml";
     this.runner.elements.push(element);
@@ -4012,6 +4085,23 @@ export class NativeCircuitApp {
         );
       }
     );
+    const customLogicModelNames = new Set(
+      modelRecords
+        .filter((record) => record.trimStart().startsWith("!"))
+        .map((record) => CustomLogicModel.unescape(record.trim().split(/\s+/)[1] ?? ""))
+    );
+    for (const element of this.runner.elements) {
+      if (!(element instanceof CustomLogicElm) || customLogicModelNames.has(element.modelName)) continue;
+      const model = element.model;
+      modelRecords.push([
+        "!", CustomLogicModel.escape(model.name), model.flags,
+        CustomLogicModel.escape(model.inputs.join(",")),
+        CustomLogicModel.escape(model.outputs.join(",")),
+        CustomLogicModel.escape(model.infoText),
+        CustomLogicModel.escape(model.rules)
+      ].join(" "));
+      customLogicModelNames.add(element.modelName);
+    }
     const otherRecords = this.runner.preservedTextRecords.filter((record) => {
       if (modelRecords.includes(record)) return false;
       return record.trimStart().split(/\s+/, 1)[0] !== "o";
@@ -4097,6 +4187,24 @@ export class NativeCircuitApp {
     );
     for (const record of modelRecords) {
       root.append(this.xmlRecordToElement(document, record));
+    }
+    const customLogicModelNames = new Set(
+      modelRecords
+        .filter((record) => record.tagName === "clm")
+        .map((record) => record.attributes.nm)
+    );
+    for (const element of this.runner.elements) {
+      if (!(element instanceof CustomLogicElm) || customLogicModelNames.has(element.modelName)) continue;
+      const model = element.model;
+      const modelElement = document.createElement("clm");
+      modelElement.setAttribute("nm", model.name);
+      modelElement.setAttribute("f", String(model.flags));
+      modelElement.setAttribute("in", model.inputs.join(","));
+      modelElement.setAttribute("o", model.outputs.join(","));
+      modelElement.setAttribute("if", model.infoText);
+      modelElement.textContent = model.rules;
+      root.append(modelElement);
+      customLogicModelNames.add(element.modelName);
     }
     for (const element of this.runner.elements) {
       const xmlElement = document.createElement(

@@ -25,6 +25,26 @@ export class CustomLogicModel {
     return model;
   }
 
+  public static getModelWithNameOrCopy(
+    name: string,
+    source: CustomLogicModel
+  ): CustomLogicModel {
+    const existing = CustomLogicModel.models.get(name);
+    if (existing !== undefined) return existing;
+    const model = new CustomLogicModel();
+    model.flags = source.flags;
+    model.name = name;
+    model.inputs = [...source.inputs];
+    model.outputs = [...source.outputs];
+    model.infoText = name;
+    model.rules = source.rules;
+    model.rulesLeft = [...source.rulesLeft];
+    model.rulesRight = [...source.rulesRight];
+    model.triState = source.triState;
+    CustomLogicModel.models.set(name, model);
+    return model;
+  }
+
   public static undumpModel(tokenizer: StringTokenizer): void {
     if (!tokenizer.hasMoreTokens()) return;
     const name = CustomLogicModel.unescape(tokenizer.nextToken());
