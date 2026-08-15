@@ -274,11 +274,15 @@ export class CircuitCanvasRenderer {
     offsetY: 0
   };
 
-  public fit(elements: CircuitElm[], width: number, height: number): void {
+  public fit(
+    elements: CircuitElm[],
+    width: number,
+    effectiveHeight: number
+  ): void {
     if (elements.length === 0) {
       this.viewport.scale = 1;
-      this.viewport.offsetX = width / 2;
-      this.viewport.offsetY = height / 2;
+      this.viewport.offsetX = 0;
+      this.viewport.offsetY = 0;
       return;
     }
 
@@ -292,27 +296,62 @@ export class CircuitCanvasRenderer {
     let minY = 30_000;
     let maxY = -30_000;
     for (const element of elements) {
-      minX = Math.min(minX, element.x, element.x2);
-      maxX = Math.max(maxX, element.x, element.x2);
+      const centeredText = (
+        element as CircuitElm & { isCenteredText?: () => boolean }
+      ).isCenteredText?.() ?? false;
+      if (!centeredText) {
+        minX = Math.min(minX, element.x, element.x2);
+        maxX = Math.max(maxX, element.x, element.x2);
+      }
       minY = Math.min(minY, element.y, element.y2);
       maxY = Math.max(maxY, element.y, element.y2);
       const box = element.getBoundingBox();
-      minX = Math.min(minX, box.x);
-      maxX = Math.max(maxX, box.x + box.width);
+      if (!centeredText) {
+        minX = Math.min(minX, box.x);
+        maxX = Math.max(maxX, box.x + box.width);
+      }
       minY = Math.min(minY, box.y);
       maxY = Math.max(maxY, box.y + box.height);
+
+      if (element instanceof GateElm) {
+        const perpendicularX = Math.trunc(element.dpx1 * element.hs2);
+        const perpendicularY = Math.trunc(element.dpy1 * element.hs2);
+        if (!centeredText) {
+          minX = Math.min(
+            minX,
+            element.point1.x + perpendicularX,
+            element.point1.x - perpendicularX
+          );
+          maxX = Math.max(
+            maxX,
+            element.point1.x + perpendicularX,
+            element.point1.x - perpendicularX
+          );
+        }
+        minY = Math.min(
+          minY,
+          element.point1.y + perpendicularY,
+          element.point1.y - perpendicularY
+        );
+        maxY = Math.max(
+          maxY,
+          element.point1.y + perpendicularY,
+          element.point1.y - perpendicularY
+        );
+      }
     }
     const circuitWidth = maxX - minX;
     const circuitHeight = maxY - minY;
     const scale = Math.min(
       width / (circuitWidth + 140),
-      height / (circuitHeight + 100),
+      effectiveHeight / (circuitHeight + 100),
       1.5
     );
 
     this.viewport.scale = scale;
     this.viewport.offsetX = (width - circuitWidth * scale) / 2 - minX * scale;
-    this.viewport.offsetY = (height - circuitHeight * scale) / 2 - minY * scale;
+    this.viewport.offsetY =
+      (effectiveHeight - circuitHeight * scale) / 2 - minY * scale;
   }
 
   public modelToScreen(point: Point): { x: number; y: number } {
