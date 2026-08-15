@@ -78,6 +78,7 @@ export class InverterElm extends CircuitElm {
       this.point2,
       0.5 + (width + 2) / denominator
     );
+    this.setBoundingBoxAroundPoints(this.point1, this.point2, 16);
   }
 
   public override getVoltageSourceCount(): number {
